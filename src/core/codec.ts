@@ -1,6 +1,10 @@
+import { PI_SOURCE_SIZES, indexedOffsets, transformedFeatureHash, type PiIndex } from './piIndex';
+
 export const HEADER_BYTES = 24;
 export const RECORD_BYTES = 12;
 const MAGIC = [0x50, 0x49, 0x50, 0x57];
+const FORMAT_VERSION = 4;
+const DICTIONARY_ID = 1;
 export type EncodedStats = { budgetBytes:number; actualBytes:number; ratio:number; tileSize:number; patches:number; piPatches:number; mse:number; psnr:number };
 export type EncodeResult = { bytes:Uint8Array; image:ImageData; stats:EncodedStats };
 type Record = { offset:number; bias:[number,number,number]; gain:[number,number,number]; transform:number; repeat:number; phase:number; sourceSize:number; solid:boolean; gradient?:boolean };
@@ -54,27 +58,61 @@ function solid(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number
 function colorDescriptor(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number){
   const sums=new Float64Array(48),counts=new Uint16Array(16);for(let y=0;y<th;y++)for(let x=0;x<tw;x++){const cell=Math.min(3,Math.floor(y*4/th))*4+Math.min(3,Math.floor(x*4/tw)),p=((y0+y)*width+x0+x)*4;for(let ch=0;ch<3;ch++)sums[ch*16+cell]+=data[p+ch];counts[cell]++;}for(let ch=0;ch<3;ch++)for(let i=0;i<16;i++)sums[ch*16+i]/=Math.max(1,counts[i]);return sums;
 }
+function principalDescriptor(target:Float64Array){
+  const mean=[0,0,0],cov=[[0,0,0],[0,0,0],[0,0,0]];
+  for(let ch=0;ch<3;ch++)for(let i=0;i<16;i++)mean[ch]+=target[ch*16+i]/16;
+  for(let i=0;i<16;i++){
+    const v=[target[i]-mean[0],target[16+i]-mean[1],target[32+i]-mean[2]];
+    for(let a=0;a<3;a++)for(let b=0;b<3;b++)cov[a][b]+=v[a]*v[b];
+  }
+  let axis=[1,1,1];
+  for(let iter=0;iter<5;iter++){
+    const next=[
+      cov[0][0]*axis[0]+cov[0][1]*axis[1]+cov[0][2]*axis[2],
+      cov[1][0]*axis[0]+cov[1][1]*axis[1]+cov[1][2]*axis[2],
+      cov[2][0]*axis[0]+cov[2][1]*axis[1]+cov[2][2]*axis[2],
+    ],norm=Math.hypot(...next)||1;
+    axis=next.map(value=>value/norm);
+  }
+  const out=new Float64Array(16);
+  for(let i=0;i<16;i++)out[i]=(target[i]-mean[0])*axis[0]+(target[16+i]-mean[1])*axis[1]+(target[32+i]-mean[2])*axis[2];
+  return out;
+}
 function descriptorScore(target:Float64Array,d:Uint8Array,c:Omit<Candidate,'score'>,tw:number,th:number){
   let sx=0,sxx=0,score=0;const q=new Float64Array(16);for(let i=0;i<16;i++){const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4));q[i]=qAt(d,c.offset,x,y,c.transform,c.repeat,c.phase,c.sourceSize,tw,th);sx+=q[i];sxx+=q[i]*q[i];}const den=16*sxx-sx*sx;for(let ch=0;ch<3;ch++){let sy=0,sxy=0;for(let i=0;i<16;i++){sy+=target[ch*16+i];sxy+=q[i]*target[ch*16+i];}const g=den?(16*sxy-sx*sy)/den:0,b=(sy-g*sx)/16;for(let i=0;i<16;i++){const delta=target[ch*16+i]-(b+g*q[i]);score+=delta*delta;}}return score;
 }
-function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,quality:number){
-  const target=colorDescriptor(data,width,x0,y0,tw,th),offsets=quality===0?24:quality===1?64:160,keep=quality===0?128:quality===1?256:512,list:Candidate[]=[],sourceSizes=(quality===0?[2,4,8]:[2,4,8,16]).filter(size=>size<=Math.max(tw,th)&&size*size<=d.length);
-  for(const sourceSize of sourceSizes){const maxOffset=Math.max(0,d.length-sourceSize*sourceSize),shapeOffsets=sourceSize===4?offsets:Math.max(8,Math.floor(offsets/2));for(let i=0;i<shapeOffsets;i++){const offset=maxOffset?Math.floor(i*maxOffset/shapeOffsets):0;for(let repeat=0;repeat<3;repeat++)for(let transform=0;transform<8;transform++)for(let phase=0;phase<4;phase++){const base={offset,repeat,transform,phase,sourceSize},score=descriptorScore(target,d,base,tw,th);if(list.length<keep||score<list[list.length-1].score){list.push({...base,score});list.sort((a,b)=>a.score-b.score);if(list.length>keep)list.pop();}}}}return list;
+function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number){
+  const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),scored:Candidate[]=[];
+  const transforms=quality===0?[0,2]:quality===1?[0,1,2,3]:[0,1,2,3,4,5,6,7],hashes=new Set<number>(),mask=(1<<index.bucketBits)-1;
+  for(const transform of transforms){const hash=transformedFeatureHash(feature,transform);hashes.add(hash);hashes.add(hash^mask);}
+  const slotLimit=quality===0?2:quality===1?4:8,keep=quality===0?96:quality===1?192:384,fallback=quality===0?4:quality===1?8:16,repeatCount=quality===0?2:3,phaseCount=quality===0?2:4;
+  const sourceCodes=(quality===0?[0,1,2]:[0,1,2,3]).filter(code=>PI_SOURCE_SIZES[code]<=Math.max(tw,th)&&PI_SOURCE_SIZES[code]**2<=d.length);
+  for(const sourceCode of sourceCodes){
+    const sourceSize=PI_SOURCE_SIZES[sourceCode],maxOffset=d.length-sourceSize*sourceSize,offsets=new Set<number>();
+    for(const hash of hashes)for(const offset of indexedOffsets(index,sourceCode,hash,slotLimit))if(offset<=maxOffset)offsets.add(offset);
+    for(let i=0;i<fallback;i++)offsets.add(Math.floor(i*Math.max(1,maxOffset)/fallback));
+    for(const offset of offsets)for(let repeat=0;repeat<repeatCount;repeat++)for(let transform=0;transform<8;transform++)for(let phase=0;phase<phaseCount;phase++){
+      const base={offset,repeat,transform,phase,sourceSize},score=descriptorScore(target,d,base,tw,th);
+      scored.push({...base,score});
+    }
+  }
+  scored.sort((a,b)=>a.score-b.score);
+  return scored.slice(0,keep);
 }
-function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,quality:number){
+function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number){
   let out=solid(data,width,x0,y0,tw,th),bestError=reconstructionError(out,data,width,x0,y0,tw,th,d),slope=gradient(data,width,x0,y0,tw,th),slopeError=reconstructionError(slope,data,width,x0,y0,tw,th,d);
   if(slopeError<bestError){out=slope;bestError=slopeError;}
   if(bestError<tw*th*3) return out;
-  for(const candidate of shortlist(data,width,x0,y0,tw,th,d,quality)){const record=fit(data,width,x0,y0,tw,th,d,candidate),error=reconstructionError(record,data,width,x0,y0,tw,th,d);if(error<bestError){bestError=error;out=record;}}return out;
+  for(const candidate of shortlist(data,width,x0,y0,tw,th,d,index,quality)){const record=fit(data,width,x0,y0,tw,th,d,candidate),error=reconstructionError(record,data,width,x0,y0,tw,th,d);if(error<bestError){bestError=error;out=record;}}return out;
 }
 type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; children?:Region[]; tried?:boolean };
 function partition(x:number,y:number,w:number,h:number){const a=Math.floor(w/2),b=Math.floor(h/2);return[[x,y,a,b],[x+a,y,w-a,b],[x,y+b,a,h-b],[x+a,y+b,w-a,h-b]] as const;}
-export function encode(source:ImageData,digits:Uint8Array,savePercent:number,quality=1):EncodeResult {
-  if(!digits.length||digits.length>0xffffffff||source.width>65535||source.height>65535)throw new Error('画像または円周率辞書が無効です');
+export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1):EncodeResult {
+  if(!digits.length||digits.length>0xffffffff||index.digitCount!==digits.length||source.width>65535||source.height>65535)throw new Error('画像・円周率辞書・特徴インデックスが一致しません');
   const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+13,Math.floor(raw*savePercent/100));
   let tile=Math.max(16,Math.min(64,Math.ceil(Math.max(source.width,source.height)/8))),cols=Math.ceil(source.width/tile),rows=Math.ceil(source.height/tile);
   while(HEADER_BYTES+cols*rows*13>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
-  const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,quality);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
+  const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
   const roots:Region[]=[],leaves:Region[]=[];
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){
     const x=gx*tile,y=gy*tile,node=make(x,y,Math.min(tile,source.width-x),Math.min(tile,source.height-y));roots.push(node);leaves.push(node);
@@ -92,7 +130,7 @@ export function encode(source:ImageData,digits:Uint8Array,savePercent:number,qua
     if(reduction<selected.error*0.12||reduction<selected.w*selected.h*3*4)continue;
     selected.children=children;leaves.splice(leaves.indexOf(selected),1,...children);size+=40;
   }
-  const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,4);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);
+  const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,DICTIONARY_ID);
   let cursor=HEADER_BYTES;
   const write=(node:Region)=>{
     if(node.children){view.setUint8(cursor++,1);node.children.forEach(write);return;}
@@ -105,32 +143,32 @@ export function encode(source:ImageData,digits:Uint8Array,savePercent:number,qua
   return{bytes,image,stats:{budgetBytes:budget,actualBytes:bytes.length,ratio:bytes.length/raw*100,tileSize:tile,patches:leaves.length,piPatches:leaves.filter(r=>!r.record.solid&&!r.record.gradient).length,mse,psnr}};
 }
 export function decode(bytes:Uint8Array,digits:Uint8Array):ImageData {
-  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),version=bytes.length>=5?view.getUint8(4):0;if(bytes.length<HEADER_BYTES||MAGIC.some((m,i)=>view.getUint8(i)!==m)||(version!==1&&version!==2&&version!==3&&version!==4))throw new Error('対応していない .pipw です');
-  const w=view.getUint16(5,true),h=view.getUint16(7,true),tile=view.getUint16(9,true),cols=view.getUint16(11,true),rows=view.getUint16(13,true),need=view.getUint32(15,true),count=view.getUint32(19,true);if(!w||!h||!tile||w*h>16_777_216||digits.length<need||cols!==Math.ceil(w/tile)||rows!==Math.ceil(h/tile)||count<cols*rows||count>w*h||version<3&&HEADER_BYTES+count*RECORD_BYTES!==bytes.length)throw new Error('破損または辞書が一致しません');
-  if(version>=3){
-    const out=new ImageData(w,h);let cursor=HEADER_BYTES,seen=0;
-    const read=(x0:number,y0:number,tw:number,th:number,depth:number):void=>{
-      if(cursor>=bytes.length||depth>16)throw new Error('分割情報が破損しています');
-      const tag=view.getUint8(cursor++);
-      if(tag===1){if(tw<8||th<8)throw new Error('分割情報が破損しています');for(const [x,y,a,b] of partition(x0,y0,tw,th))read(x,y,a,b,depth+1);return;}
-      if(tag!==0||cursor+RECORD_BYTES>bytes.length||++seen>count)throw new Error('パッチが破損しています');
-      const p=cursor;cursor+=RECORD_BYTES;
-      const offset=view.getUint32(p,true),bias:[number,number,number]=[view.getUint8(p+4),view.getUint8(p+5),view.getUint8(p+6)],gain:[number,number,number]=[view.getInt8(p+7),view.getInt8(p+8),view.getInt8(p+9)],flags=view.getUint8(p+10),modeByte=view.getUint8(p+11),mode=version>=4?modeByte&3:modeByte,sourceSize=version>=4?1<<(((modeByte>>2)&3)+1):4;
-      if(mode>2||mode===0&&offset+sourceSize*sourceSize>need)throw new Error('桁位置が範囲外です');
-      const r:Record={offset,bias,gain,transform:flags&7,repeat:(flags>>3)&3,phase:(flags>>5)&3,sourceSize,solid:mode===1,gradient:mode===2};
-      for(let y=0;y<th;y++)for(let x=0;x<tw;x++){
-        const z=((y0+y)*w+x0+x)*4;for(let ch=0;ch<3;ch++)out.data[z+ch]=pixel(r,digits,x,y,tw,th,ch);out.data[z+3]=255;
-      }
-    };
-    for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){const x=gx*tile,y=gy*tile;read(x,y,Math.min(tile,w-x),Math.min(tile,h-y),0);}
-    if(cursor!==bytes.length||seen!==count)throw new Error('パッチ数が一致しません');return out;
-  }
-  const out=new ImageData(w,h);for(let i=0;i<count;i++){const p=HEADER_BYTES+i*RECORD_BYTES,offset=view.getUint32(p,true),bias=[view.getUint8(p+4),view.getUint8(p+5),view.getUint8(p+6)],gain=[view.getInt8(p+7),view.getInt8(p+8),view.getInt8(p+9)],flags=view.getUint8(p+10),solid=!!view.getUint8(p+11),transform=flags&7,repeat=(flags>>3)&3,phase=version===2?(flags>>5)&3:0,gx=i%cols,gy=Math.floor(i/cols),x0=gx*tile,y0=gy*tile,tw=Math.min(tile,w-x0),th=Math.min(tile,h-y0);if(offset+16>need)throw new Error('桁位置が範囲外です');for(let y=0;y<th;y++)for(let x=0;x<tw;x++){const q=solid?0:qAt(digits,offset,x,y,transform,repeat,phase,4,tw,th),z=((y0+y)*w+x0+x)*4;for(let ch=0;ch<3;ch++)out.data[z+ch]=clamp(bias[ch]+gain[ch]*q);out.data[z+3]=255;}}return out;
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  if(bytes.length<HEADER_BYTES||MAGIC.some((m,i)=>view.getUint8(i)!==m)||view.getUint8(4)!==FORMAT_VERSION||view.getUint8(23)!==DICTIONARY_ID)throw new Error('対応していない .pipw です');
+  const w=view.getUint16(5,true),h=view.getUint16(7,true),tile=view.getUint16(9,true),cols=view.getUint16(11,true),rows=view.getUint16(13,true),need=view.getUint32(15,true),count=view.getUint32(19,true);
+  if(!w||!h||!tile||w*h>16_777_216||digits.length!==need||cols!==Math.ceil(w/tile)||rows!==Math.ceil(h/tile)||count<cols*rows||count>w*h)throw new Error('破損または辞書が一致しません');
+  const out=new ImageData(w,h);let cursor=HEADER_BYTES,seen=0;
+  const read=(x0:number,y0:number,tw:number,th:number,depth:number):void=>{
+    if(cursor>=bytes.length||depth>16)throw new Error('分割情報が破損しています');
+    const tag=view.getUint8(cursor++);
+    if(tag===1){if(tw<8||th<8)throw new Error('分割情報が破損しています');for(const [x,y,a,b] of partition(x0,y0,tw,th))read(x,y,a,b,depth+1);return;}
+    if(tag!==0||cursor+RECORD_BYTES>bytes.length||++seen>count)throw new Error('パッチが破損しています');
+    const p=cursor;cursor+=RECORD_BYTES;
+    const offset=view.getUint32(p,true),bias:[number,number,number]=[view.getUint8(p+4),view.getUint8(p+5),view.getUint8(p+6)],gain:[number,number,number]=[view.getInt8(p+7),view.getInt8(p+8),view.getInt8(p+9)],flags=view.getUint8(p+10),modeByte=view.getUint8(p+11),mode=modeByte&3,sourceSize=1<<(((modeByte>>2)&3)+1);
+    if((flags&0x80)!==0||(modeByte&0xf0)!==0||mode>2||mode===0&&offset+sourceSize*sourceSize>need)throw new Error('パッチが破損しています');
+    const r:Record={offset,bias,gain,transform:flags&7,repeat:(flags>>3)&3,phase:(flags>>5)&3,sourceSize,solid:mode===1,gradient:mode===2};
+    for(let y=0;y<th;y++)for(let x=0;x<tw;x++){
+      const z=((y0+y)*w+x0+x)*4;for(let ch=0;ch<3;ch++)out.data[z+ch]=pixel(r,digits,x,y,tw,th,ch);out.data[z+3]=255;
+    }
+  };
+  for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){const x=gx*tile,y=gy*tile;read(x,y,Math.min(tile,w-x),Math.min(tile,h-y),0);}
+  if(cursor!==bytes.length||seen!==count)throw new Error('パッチ数が一致しません');
+  return out;
 }
 export function mseOf(a:ImageData,b:ImageData){let e=0;for(let i=0;i<a.data.length;i+=4)for(let ch=0;ch<3;ch++){const d=a.data[i+ch]-b.data[i+ch];e+=d*d;}return e/(a.width*a.height*3);}
 export function patchRects(bytes:Uint8Array):Array<[number,number,number,number]> {
   const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),w=view.getUint16(5,true),h=view.getUint16(7,true),tile=view.getUint16(9,true),cols=view.getUint16(11,true),rows=view.getUint16(13,true);
-  if(bytes[4]!==3&&bytes[4]!==4)return Array.from({length:cols*rows},(_,i)=>{const x=i%cols*tile,y=Math.floor(i/cols)*tile;return[x,y,Math.min(tile,w-x),Math.min(tile,h-y)] as [number,number,number,number];});
+  if(bytes.length<HEADER_BYTES||bytes[4]!==FORMAT_VERSION||bytes[23]!==DICTIONARY_ID)throw new Error('対応していない .pipw です');
   const rects:Array<[number,number,number,number]>=[];let cursor=HEADER_BYTES;
   const walk=(x:number,y:number,a:number,b:number):void=>{
     const tag=bytes[cursor++];if(tag===1){for(const [u,v,m,n] of partition(x,y,a,b))walk(u,v,m,n);return;}
