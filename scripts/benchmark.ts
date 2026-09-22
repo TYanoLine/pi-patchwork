@@ -1,4 +1,4 @@
-import { encode,parseDigits } from '../src/core/codec';
+import { encode,parseDigits } from '../src/core/codec.ts';
 class I{data:Uint8ClampedArray;width:number;height:number;constructor(data:Uint8ClampedArray|number,w:number,h?:number){if(typeof data==='number'){this.width=data;this.height=w;this.data=new Uint8ClampedArray(data*w*4)}else{this.data=data;this.width=w;this.height=h!}}};(globalThis as any).ImageData=I;
 const digits=parseDigits(await (await import('node:fs/promises')).readFile('public/pi-10k.txt','utf8'));
 function image(kind:string,n=64){const d=new Uint8ClampedArray(n*n*4);for(let y=0;y<n;y++)for(let x=0;x<n;x++){const p=(y*n+x)*4;let v=kind==='flat'?120:kind==='gradient'?Math.round(x/(n-1)*255):(x*37+y*53+(x*y)%97)%256;d[p]=v;d[p+1]=kind==='texture'?(v*3)%256:v;d[p+2]=kind==='texture'?(v*7)%256:v;d[p+3]=255;}return new ImageData(d,n,n)}

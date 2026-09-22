@@ -10,7 +10,8 @@ import { decode,encode,parseDigits,HEADER_BYTES,RECORD_BYTES } from '../src/core
 const digits=parseDigits('14159265358979323846264338327950288419716939937510'.repeat(20));
 function sample(w=32,h=24){const d=new Uint8ClampedArray(w*h*4);for(let y=0;y<h;y++)for(let x=0;x<w;x++){const p=(y*w+x)*4;d[p]=x*7%256;d[p+1]=y*11%256;d[p+2]=(x+y)*5%256;d[p+3]=255;}return new ImageData(d,w,h);}
 describe('pipw codec',()=>{
-  it('stays within budget and decodes deterministically',()=>{const src=sample(),r=encode(src,digits,20,0);expect(r.bytes.length).toBeLessThanOrEqual(r.stats.budgetBytes);expect(Array.from(decode(r.bytes,digits).data)).toEqual(Array.from(r.image.data));});
+  it('stays within budget and decodes v2 deterministically',()=>{const src=sample(),r=encode(src,digits,20,0);expect(r.bytes[4]).toBe(2);expect(r.bytes.length).toBeLessThanOrEqual(r.stats.budgetBytes);expect(Array.from(decode(r.bytes,digits).data)).toEqual(Array.from(r.image.data));});
+  it('continues to accept v1 records',()=>{const r=encode(sample(),digits,20,0),legacy=r.bytes.slice();legacy[4]=1;for(let p=HEADER_BYTES;p<legacy.length;p+=RECORD_BYTES)legacy[p+10]&=0x1f;expect(()=>decode(legacy,digits)).not.toThrow();});
   it('rejects a corrupt payload',()=>expect(()=>decode(new Uint8Array(HEADER_BYTES+RECORD_BYTES),digits)).toThrow());
   it('scores visual error instead of exact byte matches',()=>expect(encode(sample(16,16),digits,50,1).stats.mse).toBeGreaterThanOrEqual(0));
 });
