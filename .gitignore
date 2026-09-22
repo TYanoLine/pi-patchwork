@@ -6,3 +6,5 @@ dist
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
+public/pi-1m.txt
+public/pi-index-1m.bin
