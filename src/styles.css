@@ -318,7 +318,7 @@ header a {
 }
 .codecMeta {
   display: grid;
-  grid-template-columns: repeat(4, auto);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   align-items: center;
   padding: 10px;
@@ -328,9 +328,26 @@ header a {
 .codecMeta strong {
   color: #e8e7e2;
   font-size: 11px;
+  grid-column: 1 / -1;
 }
 .codecMeta .warn {
   color: #e4a566;
+}
+.codecMeta button {
+  grid-column: 1 / -1;
+  border: 1px solid #465034;
+  background: #171b14;
+  color: #cce878;
+  padding: 9px 10px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font: 9px monospace;
+}
+.codecMeta button svg {
+  width: 14px;
 }
 .compareLoading {
   min-height: 120px;
@@ -348,6 +365,10 @@ header a {
   color: #656b66;
   font-size: 9px;
   line-height: 1.6;
+}
+.compareWarning {
+  color: #e4a566;
+  font-size: 9px;
 }
 .download {
   width: auto;

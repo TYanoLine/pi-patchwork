@@ -6,10 +6,12 @@ type Quality = 0 | 1 | 2;
 type Comparison = {
   label: string;
   image: ImageData;
+  blob: Blob;
   bytes: number;
   quality: number;
   psnr: number;
   delta: number;
+  encoder: string;
 };
 const qualityLabels = ["Fast", "Balanced", "Thorough"];
 function formatBytes(bytes: number) {
@@ -74,12 +76,28 @@ async function compareCodec(
   canvas.width = source.width;
   canvas.height = source.height;
   canvas.getContext("2d")!.putImageData(source, 0, 0);
+  let encoder = (quality: number) => canvasBlob(canvas, type, quality),
+    encoderName = "ブラウザ";
+  if (type === "image/webp" && !(await encoder(0.5))) {
+    const { encode } = await import("@jsquash/webp");
+    encoderName = "libwebp / WASM";
+    encoder = async (quality) =>
+      new Blob(
+        [
+          await encode(source, {
+            quality: quality * 100,
+            method: 4,
+          }),
+        ],
+        { type },
+      );
+  }
   let low = 0.001,
     high = 0.99,
     best: { blob: Blob; quality: number } | undefined;
   for (let i = 0; i < 10; i++) {
     const quality = (low + high) / 2,
-      blob = await canvasBlob(canvas, type, quality);
+      blob = await encoder(quality);
     if (!blob) return undefined;
     if (!best || Math.abs(blob.size - targetBytes) < Math.abs(best.blob.size - targetBytes))
       best = { blob, quality };
@@ -103,7 +121,17 @@ async function compareCodec(
     quality: best.quality,
     psnr: mse ? 10 * Math.log10((255 * 255) / mse) : Infinity,
     delta: ((best.blob.size - targetBytes) / targetBytes) * 100,
+    blob: best.blob,
+    encoder: encoderName,
   };
+}
+function saveComparison(comparison: Comparison) {
+  const url = URL.createObjectURL(comparison.blob),
+    a = document.createElement("a");
+  a.href = url;
+  a.download = `same-size.${comparison.label.toLowerCase()}`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function ComparisonCard({ comparison }: { comparison: Comparison }) {
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -113,13 +141,22 @@ function ComparisonCard({ comparison }: { comparison: Comparison }) {
       <canvas ref={canvas} />
       <figcaption>{comparison.label}</figcaption>
       <div className="codecMeta">
-        <strong>{formatBytes(comparison.bytes)}</strong>
+        <strong>
+          {formatBytes(comparison.bytes)} ({comparison.bytes.toLocaleString()} bytes)
+        </strong>
         <span>Q {Math.round(comparison.quality * 100)}</span>
         <span>{comparison.psnr.toFixed(2)} dB</span>
         <span className={Math.abs(comparison.delta) > 10 ? "warn" : ""}>
           目標差 {comparison.delta > 0 ? "+" : ""}
           {comparison.delta.toFixed(1)}%
         </span>
+        <span>
+          {comparison.image.width}×{comparison.image.height}
+        </span>
+        <span>{comparison.encoder}</span>
+        <button type="button" onClick={() => saveComparison(comparison)}>
+          <Download /> {comparison.label}を保存
+        </button>
       </div>
     </figure>
   );
@@ -130,7 +167,8 @@ export default function App() {
     [result, setResult] = useState<EncodeResult>();
   const [originalBytes, setOriginalBytes] = useState<number>();
   const [comparisons, setComparisons] = useState<Comparison[]>([]),
-    [comparing, setComparing] = useState(false);
+    [comparing, setComparing] = useState(false),
+    [comparisonNote, setComparisonNote] = useState("");
   const [saving, setSaving] = useState(10),
     [quality, setQuality] = useState<Quality>(1),
     [busy, setBusy] = useState(false),
@@ -160,6 +198,7 @@ export default function App() {
       setOriginalBytes(file.size);
       setResult(undefined);
       setComparisons([]);
+      setComparisonNote("");
     } catch {
       setError("画像を読み込めませんでした");
     }
@@ -188,11 +227,19 @@ export default function App() {
       const encoded = e.data.result as EncodeResult;
       setResult(encoded);
       setComparing(true);
-      const alternatives = await Promise.all([
-        compareCodec(source, encoded.stats.actualBytes, "image/jpeg"),
-        compareCodec(source, encoded.stats.actualBytes, "image/webp"),
-      ]);
-      setComparisons(alternatives.filter((item): item is Comparison => !!item));
+      setComparisonNote("");
+      const attempts = await Promise.allSettled([
+          compareCodec(source, encoded.stats.actualBytes, "image/jpeg"),
+          compareCodec(source, encoded.stats.actualBytes, "image/webp"),
+        ]),
+        alternatives = attempts.flatMap((attempt) =>
+          attempt.status === "fulfilled" && attempt.value ? [attempt.value] : [],
+        );
+      setComparisons(alternatives);
+      if (alternatives.length < 2)
+        setComparisonNote(
+          "一部の比較形式を生成できませんでした。この端末ではWASMも利用できない可能性があります。",
+        );
       setComparing(false);
     };
     w.onerror = () => {
@@ -221,6 +268,7 @@ export default function App() {
       setSource(undefined);
       setOriginalBytes(undefined);
       setComparisons([]);
+      setComparisonNote("");
       setResult({
         bytes,
         image,
@@ -426,8 +474,9 @@ export default function App() {
                     </div>
                   )}
                   <p className="compareNote">
-                    ブラウザのエンコーダーで最も近い容量を探索。形式上の最小容量により一致しない場合があります。
+                    同じ512px以下の入力から最も近い容量を探索。JPEGはブラウザ、非対応端末のWebPはlibwebp/WASMで実際のファイルを生成しています。形式上の最小容量により一致しない場合があります。
                   </p>
+                  {comparisonNote && <p className="compareWarning">{comparisonNote}</p>}
                 </section>
               )}
               <button className="download" onClick={save}>
