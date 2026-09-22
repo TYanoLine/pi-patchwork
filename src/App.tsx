@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
-import { decode, mseOf, parseDigits, type EncodeResult } from "./core/codec";
+import { decode, mseOf, parseDigits, patchRects, type EncodeResult } from "./core/codec";
 
 type Quality = 0 | 1 | 2;
 type Comparison = {
@@ -24,6 +24,7 @@ function draw(
   image: ImageData,
   grid = false,
   tile = 0,
+  bytes?: Uint8Array,
 ) {
   if (!canvas) return;
   canvas.width = image.width;
@@ -33,18 +34,7 @@ function draw(
   if (grid && tile) {
     c.strokeStyle = "rgba(255,255,255,.3)";
     c.lineWidth = 1;
-    for (let x = tile; x < image.width; x += tile) {
-      c.beginPath();
-      c.moveTo(x + 0.5, 0);
-      c.lineTo(x + 0.5, image.height);
-      c.stroke();
-    }
-    for (let y = tile; y < image.height; y += tile) {
-      c.beginPath();
-      c.moveTo(0, y + 0.5);
-      c.lineTo(image.width, y + 0.5);
-      c.stroke();
-    }
+    if(bytes){for(const [x,y,w,h] of patchRects(bytes))c.strokeRect(x+.5,y+.5,w,h);}
   }
 }
 async function fileToImageData(file: File) {
@@ -188,7 +178,7 @@ export default function App() {
     if (source) draw(original.current, source);
   }, [source]);
   useEffect(() => {
-    if (result) draw(output.current, result.image, grid, result.stats.tileSize);
+    if (result) draw(output.current, result.image, grid, result.stats.tileSize, result.bytes);
   }, [result, grid]);
   async function pick(file?: File) {
     if (!file) return;
@@ -495,7 +485,7 @@ export default function App() {
           <li>
             <b>01</b>
             <strong>分割</strong>
-            <p>サイズ予算に合うパッチへ分けます。</p>
+          <p>細部は小さく、なめらかな場所は大きなパッチに分けます。</p>
           </li>
           <li>
             <b>02</b>
@@ -505,7 +495,7 @@ export default function App() {
           <li>
             <b>03</b>
             <strong>補正</strong>
-            <p>色・回転・反転・反復・位相を調整します。</p>
+          <p>単色・グラデーション・π模様から選び、色や向きを調整します。</p>
           </li>
           <li>
             <b>04</b>
