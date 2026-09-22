@@ -1,53 +1,473 @@
-import { useEffect, useRef, useState } from 'react';
-import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from 'lucide-react';
-import { decode, parseDigits, type EncodeResult } from './core/codec';
+import { useEffect, useRef, useState } from "react";
+import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
+import { decode, mseOf, parseDigits, type EncodeResult } from "./core/codec";
 
 type Quality = 0 | 1 | 2;
-const qualityLabels = ['Fast', 'Balanced', 'Thorough'];
-function formatBytes(bytes:number){if(bytes<1024)return `${bytes.toLocaleString()} B`;if(bytes<1024*1024)return `${(bytes/1024).toFixed(1)} KB`;return `${(bytes/1024/1024).toFixed(2)} MB`;}
-function draw(canvas: HTMLCanvasElement | null, image: ImageData, grid=false, tile=0) {
-  if (!canvas) return; canvas.width=image.width; canvas.height=image.height;
-  const c=canvas.getContext('2d')!; c.putImageData(image,0,0);
-  if (grid && tile) { c.strokeStyle='rgba(255,255,255,.3)'; c.lineWidth=1;
-    for(let x=tile;x<image.width;x+=tile){c.beginPath();c.moveTo(x+.5,0);c.lineTo(x+.5,image.height);c.stroke();}
-    for(let y=tile;y<image.height;y+=tile){c.beginPath();c.moveTo(0,y+.5);c.lineTo(image.width,y+.5);c.stroke();}
+type Comparison = {
+  label: string;
+  image: ImageData;
+  bytes: number;
+  quality: number;
+  psnr: number;
+  delta: number;
+};
+const qualityLabels = ["Fast", "Balanced", "Thorough"];
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes.toLocaleString()} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+function draw(
+  canvas: HTMLCanvasElement | null,
+  image: ImageData,
+  grid = false,
+  tile = 0,
+) {
+  if (!canvas) return;
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const c = canvas.getContext("2d")!;
+  c.putImageData(image, 0, 0);
+  if (grid && tile) {
+    c.strokeStyle = "rgba(255,255,255,.3)";
+    c.lineWidth = 1;
+    for (let x = tile; x < image.width; x += tile) {
+      c.beginPath();
+      c.moveTo(x + 0.5, 0);
+      c.lineTo(x + 0.5, image.height);
+      c.stroke();
+    }
+    for (let y = tile; y < image.height; y += tile) {
+      c.beginPath();
+      c.moveTo(0, y + 0.5);
+      c.lineTo(image.width, y + 0.5);
+      c.stroke();
+    }
   }
 }
-async function fileToImageData(file:File){
-  const bitmap=await createImageBitmap(file), scale=Math.min(1,512/Math.max(bitmap.width,bitmap.height));
-  const w=Math.max(1,Math.round(bitmap.width*scale)),h=Math.max(1,Math.round(bitmap.height*scale));
-  const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h; const c=canvas.getContext('2d')!;
-  c.fillStyle='#111';c.fillRect(0,0,w,h);c.drawImage(bitmap,0,0,w,h);bitmap.close();return c.getImageData(0,0,w,h);
+async function fileToImageData(file: File) {
+  const bitmap = await createImageBitmap(file),
+    scale = Math.min(1, 512 / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale)),
+    h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const c = canvas.getContext("2d")!;
+  c.fillStyle = "#111";
+  c.fillRect(0, 0, w, h);
+  c.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  return c.getImageData(0, 0, w, h);
 }
-export default function App(){
-  const [digits,setDigits]=useState(''),[source,setSource]=useState<ImageData>(),[result,setResult]=useState<EncodeResult>();
-  const [originalBytes,setOriginalBytes]=useState<number>();
-  const [saving,setSaving]=useState(10),[quality,setQuality]=useState<Quality>(1),[busy,setBusy]=useState(false),[grid,setGrid]=useState(true),[error,setError]=useState('');
-  const original=useRef<HTMLCanvasElement>(null),output=useRef<HTMLCanvasElement>(null),worker=useRef<Worker|undefined>(undefined);
-  useEffect(()=>{fetch('/pi-10k.txt').then(r=>r.text()).then(setDigits).catch(()=>setError('円周率辞書を読み込めませんでした'));return()=>worker.current?.terminate();},[]);
-  useEffect(()=>{if(source)draw(original.current,source)},[source]);
-  useEffect(()=>{if(result)draw(output.current,result.image,grid,result.stats.tileSize)},[result,grid]);
-  async function pick(file?:File){if(!file)return;setError('');try{setSource(await fileToImageData(file));setOriginalBytes(file.size);setResult(undefined);}catch{setError('画像を読み込めませんでした');}}
-  function run(){if(!source||!digits)return;setBusy(true);setError('');worker.current?.terminate();const w=new Worker(new URL('./workers/encoder.ts',import.meta.url),{type:'module'});worker.current=w;
-    const image=new ImageData(new Uint8ClampedArray(source.data),source.width,source.height);
-    w.onmessage=e=>{setBusy(false);e.data.ok?setResult(e.data.result):setError(e.data.error);w.terminate();};w.onerror=()=>{setBusy(false);setError('処理中にエラーが発生しました');};w.postMessage({image,digits,savePercent:saving,quality},[image.data.buffer]);
+function canvasBlob(canvas: HTMLCanvasElement, type: string, quality: number) {
+  return new Promise<Blob | null>((resolve) =>
+    canvas.toBlob((blob) => resolve(blob?.type === type ? blob : null), type, quality),
+  );
+}
+async function compareCodec(
+  source: ImageData,
+  targetBytes: number,
+  type: "image/jpeg" | "image/webp",
+): Promise<Comparison | undefined> {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  canvas.getContext("2d")!.putImageData(source, 0, 0);
+  let low = 0.001,
+    high = 0.99,
+    best: { blob: Blob; quality: number } | undefined;
+  for (let i = 0; i < 10; i++) {
+    const quality = (low + high) / 2,
+      blob = await canvasBlob(canvas, type, quality);
+    if (!blob) return undefined;
+    if (!best || Math.abs(blob.size - targetBytes) < Math.abs(best.blob.size - targetBytes))
+      best = { blob, quality };
+    if (blob.size > targetBytes) high = quality;
+    else low = quality;
   }
-  function save(){if(!result)return;const url=URL.createObjectURL(new Blob([result.bytes as BlobPart]));const a=document.createElement('a');a.href=url;a.download='image.pipw';a.click();URL.revokeObjectURL(url);}
-  async function openPipw(file?:File){if(!file||!digits)return;try{const bytes=new Uint8Array(await file.arrayBuffer()),image=decode(bytes,parseDigits(digits)),v=new DataView(bytes.buffer);setSource(undefined);setOriginalBytes(undefined);setResult({bytes,image,stats:{budgetBytes:bytes.length,actualBytes:bytes.length,ratio:0,tileSize:v.getUint16(9,true),patches:v.getUint32(19,true),piPatches:0,mse:0,psnr:0}});}catch(e){setError(e instanceof Error?e.message:'読み込めませんでした');}}
-  return <main>
-    <header><div className="mark"><Pi/></div><div><b>PI PATCHWORK</b><span>visual codec experiment</span></div><a href="#how">How it works</a></header>
-    <section className="hero"><p className="eyebrow"><Sparkles/> THE DIGITS BECOME TEXTURE</p><h1>円周率で、<em>画像を編み直す。</em></h1><p>円周率の桁を共有パターンとして参照し、色補正・回転・反転・繰り返しで画像を再構成する不可逆コーデックです。</p></section>
-    <section className="workbench"><aside>
-      <label className="drop"><ImagePlus/><strong>画像を選択</strong><small>PNG / JPEG / WebP · 最大辺512px</small><input type="file" accept="image/*" onChange={e=>pick(e.target.files?.[0])}/></label>
-      <div className="control"><div><span>保存率</span><b>{saving}%</b></div><input type="range" min="2" max="50" value={saving} onChange={e=>setSaving(+e.target.value)}/><small>非圧縮RGBに対する目標サイズ</small></div>
-      <div className="control"><span>探索モード</span><div className="segments">{qualityLabels.map((q,i)=><button className={quality===i?'active':''} onClick={()=>setQuality(i as Quality)} key={q}>{q}</button>)}</div></div>
-      <button className="primary" disabled={!source||!digits||busy} onClick={run}>{busy?<LoaderCircle className="spin"/>:<Sparkles/>}{busy?'探索中…':'再構成する'}</button>
-      <label className="open">.pipw を開く<input type="file" accept=".pipw" onChange={e=>openPipw(e.target.files?.[0])}/></label>{error&&<p className="error">{error}</p>}
-    </aside><div className="preview"><div className="previewHead"><span>PREVIEW</span>{result&&<label><input type="checkbox" checked={grid} onChange={e=>setGrid(e.target.checked)}/> パッチ境界</label>}</div>
-      <div className="canvases"><figure className={!source?'empty':''}>{source?<canvas ref={original}/>:<div><ImagePlus/><span>画像を追加してください</span></div>}<figcaption>ORIGINAL</figcaption></figure><figure className={!result?'empty':''}>{result?<canvas ref={output}/>:<div><Pi/><span>再構成結果</span></div>}<figcaption>PI PATCHWORK</figcaption></figure></div>
-      {result&&<><div className="stats"><div><small>元ファイル</small><strong>{originalBytes?formatBytes(originalBytes):'—'}</strong></div><div><small>.pipw</small><strong>{formatBytes(result.stats.actualBytes)}</strong></div><div><small>元ファイル比</small><strong>{originalBytes?(result.stats.actualBytes/originalBytes*100).toFixed(2)+'%':'—'}</strong></div><div><small>RGB保存率</small><strong>{result.stats.ratio?result.stats.ratio.toFixed(2)+'%':'—'}</strong></div><div><small>PSNR</small><strong>{result.stats.psnr?result.stats.psnr.toFixed(2)+' dB':'—'}</strong></div><div><small>パッチ / π</small><strong>{result.stats.patches} / {result.stats.piPatches||0}</strong></div></div><button className="download" onClick={save}><Download/> .pipw を保存</button></>}
-    </div></section>
-    <section className="how" id="how"><span>HOW IT WORKS</span><h2>画像ではなく、<em>作り方</em>を保存する。</h2><ol><li><b>01</b><strong>分割</strong><p>サイズ予算に合うパッチへ分けます。</p></li><li><b>02</b><strong>特徴探索</strong><p>4×4の色特徴から候補を絞ります。</p></li><li><b>03</b><strong>補正</strong><p>色・回転・反転・反復・位相を調整します。</p></li><li><b>04</b><strong>再構成</strong><p>境界も評価して参照値から描き直します。</p></li></ol></section>
-    <footer>πの正規性や圧縮効率は保証されません。画像はブラウザ内だけで処理されます。</footer>
-  </main>;
+  if (!best) return undefined;
+  const bitmap = await createImageBitmap(best.blob),
+    decoded = document.createElement("canvas");
+  decoded.width = source.width;
+  decoded.height = source.height;
+  const context = decoded.getContext("2d")!;
+  context.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const image = context.getImageData(0, 0, source.width, source.height),
+    mse = mseOf(source, image);
+  return {
+    label: type === "image/jpeg" ? "JPEG" : "WebP",
+    image,
+    bytes: best.blob.size,
+    quality: best.quality,
+    psnr: mse ? 10 * Math.log10((255 * 255) / mse) : Infinity,
+    delta: ((best.blob.size - targetBytes) / targetBytes) * 100,
+  };
+}
+function ComparisonCard({ comparison }: { comparison: Comparison }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  useEffect(() => draw(canvas.current, comparison.image), [comparison]);
+  return (
+    <figure>
+      <canvas ref={canvas} />
+      <figcaption>{comparison.label}</figcaption>
+      <div className="codecMeta">
+        <strong>{formatBytes(comparison.bytes)}</strong>
+        <span>Q {Math.round(comparison.quality * 100)}</span>
+        <span>{comparison.psnr.toFixed(2)} dB</span>
+        <span className={Math.abs(comparison.delta) > 10 ? "warn" : ""}>
+          目標差 {comparison.delta > 0 ? "+" : ""}
+          {comparison.delta.toFixed(1)}%
+        </span>
+      </div>
+    </figure>
+  );
+}
+export default function App() {
+  const [digits, setDigits] = useState(""),
+    [source, setSource] = useState<ImageData>(),
+    [result, setResult] = useState<EncodeResult>();
+  const [originalBytes, setOriginalBytes] = useState<number>();
+  const [comparisons, setComparisons] = useState<Comparison[]>([]),
+    [comparing, setComparing] = useState(false);
+  const [saving, setSaving] = useState(10),
+    [quality, setQuality] = useState<Quality>(1),
+    [busy, setBusy] = useState(false),
+    [grid, setGrid] = useState(true),
+    [error, setError] = useState("");
+  const original = useRef<HTMLCanvasElement>(null),
+    output = useRef<HTMLCanvasElement>(null),
+    worker = useRef<Worker | undefined>(undefined);
+  useEffect(() => {
+    fetch("/pi-10k.txt")
+      .then((r) => r.text())
+      .then(setDigits)
+      .catch(() => setError("円周率辞書を読み込めませんでした"));
+    return () => worker.current?.terminate();
+  }, []);
+  useEffect(() => {
+    if (source) draw(original.current, source);
+  }, [source]);
+  useEffect(() => {
+    if (result) draw(output.current, result.image, grid, result.stats.tileSize);
+  }, [result, grid]);
+  async function pick(file?: File) {
+    if (!file) return;
+    setError("");
+    try {
+      setSource(await fileToImageData(file));
+      setOriginalBytes(file.size);
+      setResult(undefined);
+      setComparisons([]);
+    } catch {
+      setError("画像を読み込めませんでした");
+    }
+  }
+  function run() {
+    if (!source || !digits) return;
+    setBusy(true);
+    setError("");
+    worker.current?.terminate();
+    const w = new Worker(new URL("./workers/encoder.ts", import.meta.url), {
+      type: "module",
+    });
+    worker.current = w;
+    const image = new ImageData(
+      new Uint8ClampedArray(source.data),
+      source.width,
+      source.height,
+    );
+    w.onmessage = async (e) => {
+      setBusy(false);
+      w.terminate();
+      if (!e.data.ok) {
+        setError(e.data.error);
+        return;
+      }
+      const encoded = e.data.result as EncodeResult;
+      setResult(encoded);
+      setComparing(true);
+      const alternatives = await Promise.all([
+        compareCodec(source, encoded.stats.actualBytes, "image/jpeg"),
+        compareCodec(source, encoded.stats.actualBytes, "image/webp"),
+      ]);
+      setComparisons(alternatives.filter((item): item is Comparison => !!item));
+      setComparing(false);
+    };
+    w.onerror = () => {
+      setBusy(false);
+      setError("処理中にエラーが発生しました");
+    };
+    w.postMessage({ image, digits, savePercent: saving, quality }, [
+      image.data.buffer,
+    ]);
+  }
+  function save() {
+    if (!result) return;
+    const url = URL.createObjectURL(new Blob([result.bytes as BlobPart]));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "image.pipw";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  async function openPipw(file?: File) {
+    if (!file || !digits) return;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer()),
+        image = decode(bytes, parseDigits(digits)),
+        v = new DataView(bytes.buffer);
+      setSource(undefined);
+      setOriginalBytes(undefined);
+      setComparisons([]);
+      setResult({
+        bytes,
+        image,
+        stats: {
+          budgetBytes: bytes.length,
+          actualBytes: bytes.length,
+          ratio: 0,
+          tileSize: v.getUint16(9, true),
+          patches: v.getUint32(19, true),
+          piPatches: 0,
+          mse: 0,
+          psnr: 0,
+        },
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "読み込めませんでした");
+    }
+  }
+  return (
+    <main>
+      <header>
+        <div className="mark">
+          <Pi />
+        </div>
+        <div>
+          <b>PI PATCHWORK</b>
+          <span>visual codec experiment</span>
+        </div>
+        <a href="#how">How it works</a>
+      </header>
+      <section className="hero">
+        <p className="eyebrow">
+          <Sparkles /> THE DIGITS BECOME TEXTURE
+        </p>
+        <h1>
+          円周率で、<em>画像を編み直す。</em>
+        </h1>
+        <p>
+          円周率の桁を共有パターンとして参照し、色補正・回転・反転・繰り返しで画像を再構成する不可逆コーデックです。
+        </p>
+      </section>
+      <section className="workbench">
+        <aside>
+          <label className="drop">
+            <ImagePlus />
+            <strong>画像を選択</strong>
+            <small>PNG / JPEG / WebP · 最大辺512px</small>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(e) => pick(e.target.files?.[0])}
+            />
+          </label>
+          <div className="control">
+            <div>
+              <span>保存率</span>
+              <b>{saving}%</b>
+            </div>
+            <input
+              type="range"
+              min="2"
+              max="50"
+              value={saving}
+              onChange={(e) => setSaving(+e.target.value)}
+            />
+            <small>非圧縮RGBに対する目標サイズ</small>
+          </div>
+          <div className="control">
+            <span>探索モード</span>
+            <div className="segments">
+              {qualityLabels.map((q, i) => (
+                <button
+                  className={quality === i ? "active" : ""}
+                  onClick={() => setQuality(i as Quality)}
+                  key={q}
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          </div>
+          <button
+            className="primary"
+            disabled={!source || !digits || busy}
+            onClick={run}
+          >
+            {busy ? <LoaderCircle className="spin" /> : <Sparkles />}
+            {busy ? "探索中…" : "再構成する"}
+          </button>
+          <label className="open">
+            .pipw を開く
+            <input
+              type="file"
+              accept=".pipw"
+              onChange={(e) => openPipw(e.target.files?.[0])}
+            />
+          </label>
+          {error && <p className="error">{error}</p>}
+        </aside>
+        <div className="preview">
+          <div className="previewHead">
+            <span>PREVIEW</span>
+            {result && (
+              <label>
+                <input
+                  type="checkbox"
+                  checked={grid}
+                  onChange={(e) => setGrid(e.target.checked)}
+                />{" "}
+                パッチ境界
+              </label>
+            )}
+          </div>
+          <div className="canvases">
+            <figure className={!source ? "empty" : ""}>
+              {source ? (
+                <canvas ref={original} />
+              ) : (
+                <div>
+                  <ImagePlus />
+                  <span>画像を追加してください</span>
+                </div>
+              )}
+              <figcaption>ORIGINAL</figcaption>
+            </figure>
+            <figure className={!result ? "empty" : ""}>
+              {result ? (
+                <canvas ref={output} />
+              ) : (
+                <div>
+                  <Pi />
+                  <span>再構成結果</span>
+                </div>
+              )}
+              <figcaption>PI PATCHWORK</figcaption>
+            </figure>
+          </div>
+          {result && (
+            <>
+              <div className="stats">
+                <div>
+                  <small>元ファイル</small>
+                  <strong>
+                    {originalBytes ? formatBytes(originalBytes) : "—"}
+                  </strong>
+                </div>
+                <div>
+                  <small>.pipw</small>
+                  <strong>{formatBytes(result.stats.actualBytes)}</strong>
+                </div>
+                <div>
+                  <small>元ファイル比</small>
+                  <strong>
+                    {originalBytes
+                      ? (
+                          (result.stats.actualBytes / originalBytes) *
+                          100
+                        ).toFixed(2) + "%"
+                      : "—"}
+                  </strong>
+                </div>
+                <div>
+                  <small>RGB保存率</small>
+                  <strong>
+                    {result.stats.ratio
+                      ? result.stats.ratio.toFixed(2) + "%"
+                      : "—"}
+                  </strong>
+                </div>
+                <div>
+                  <small>PSNR</small>
+                  <strong>
+                    {result.stats.psnr
+                      ? result.stats.psnr.toFixed(2) + " dB"
+                      : "—"}
+                  </strong>
+                </div>
+                <div>
+                  <small>パッチ / π</small>
+                  <strong>
+                    {result.stats.patches} / {result.stats.piPatches || 0}
+                  </strong>
+                </div>
+              </div>
+              {source && (
+                <section className="codecCompare">
+                  <div className="compareTitle">
+                    <div>
+                      <small>SAME-SIZE COMPARISON</small>
+                      <h3>.pipw と同容量のJPEG / WebP</h3>
+                    </div>
+                    <span>目標 {formatBytes(result.stats.actualBytes)}</span>
+                  </div>
+                  {comparing ? (
+                    <p className="compareLoading">
+                      <LoaderCircle className="spin" /> 同容量になる品質を探索中…
+                    </p>
+                  ) : (
+                    <div className="comparisonGrid">
+                      {comparisons.map((comparison) => (
+                        <ComparisonCard key={comparison.label} comparison={comparison} />
+                      ))}
+                    </div>
+                  )}
+                  <p className="compareNote">
+                    ブラウザのエンコーダーで最も近い容量を探索。形式上の最小容量により一致しない場合があります。
+                  </p>
+                </section>
+              )}
+              <button className="download" onClick={save}>
+                <Download /> .pipw を保存
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+      <section className="how" id="how">
+        <span>HOW IT WORKS</span>
+        <h2>
+          画像ではなく、<em>作り方</em>を保存する。
+        </h2>
+        <ol>
+          <li>
+            <b>01</b>
+            <strong>分割</strong>
+            <p>サイズ予算に合うパッチへ分けます。</p>
+          </li>
+          <li>
+            <b>02</b>
+            <strong>特徴探索</strong>
+            <p>4×4の色特徴から候補を絞ります。</p>
+          </li>
+          <li>
+            <b>03</b>
+            <strong>補正</strong>
+            <p>色・回転・反転・反復・位相を調整します。</p>
+          </li>
+          <li>
+            <b>04</b>
+            <strong>再構成</strong>
+            <p>境界も評価して参照値から描き直します。</p>
+          </li>
+        </ol>
+      </section>
+      <footer>
+        πの正規性や圧縮効率は保証されません。画像はブラウザ内だけで処理されます。
+      </footer>
+    </main>
+  );
 }
