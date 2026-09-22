@@ -71,8 +71,8 @@ type Region = { x:number; y:number; w:number; h:number; record:Record; error:num
 function partition(x:number,y:number,w:number,h:number){const a=Math.floor(w/2),b=Math.floor(h/2);return[[x,y,a,b],[x+a,y,w-a,b],[x,y+b,a,h-b],[x+a,y+b,w-a,h-b]] as const;}
 export function encode(source:ImageData,digits:Uint8Array,savePercent:number,quality=1):EncodeResult {
   if(!digits.length||source.width>65535||source.height>65535)throw new Error('画像または円周率辞書が無効です');
-  const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+13,Math.floor(raw*savePercent/100)),maxRecords=Math.max(1,Math.floor((budget-HEADER_BYTES)/13));
-  let tile=Math.max(8,Math.ceil(2*Math.sqrt(source.width*source.height/maxRecords))),cols=Math.ceil(source.width/tile),rows=Math.ceil(source.height/tile);
+  const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+13,Math.floor(raw*savePercent/100));
+  let tile=Math.max(16,Math.min(64,Math.ceil(Math.max(source.width,source.height)/8))),cols=Math.ceil(source.width/tile),rows=Math.ceil(source.height/tile);
   while(HEADER_BYTES+cols*rows*13>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
   const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,quality);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
   const roots:Region[]=[],leaves:Region[]=[];
@@ -86,7 +86,10 @@ export function encode(source:ImageData,digits:Uint8Array,savePercent:number,qua
     if(!selected)break;
     selected.tried=true;
     const children=partition(selected.x,selected.y,selected.w,selected.h).map(([x,y,w,h])=>make(x,y,w,h));
-    if(children.reduce((sum,node)=>sum+node.error,0)>=selected.error)continue;
+    const reduction=selected.error-children.reduce((sum,node)=>sum+node.error,0);
+    // Spending 40 more bytes on tiny texture changes makes every region look equally tiled.
+    // Keep larger patches unless the split has a perceptible payoff per pixel.
+    if(reduction<selected.error*0.12||reduction<selected.w*selected.h*3*4)continue;
     selected.children=children;leaves.splice(leaves.indexOf(selected),1,...children);size+=40;
   }
   const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,3);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);

@@ -32,9 +32,14 @@ function draw(
   const c = canvas.getContext("2d")!;
   c.putImageData(image, 0, 0);
   if (grid && tile) {
-    c.strokeStyle = "rgba(255,255,255,.3)";
-    c.lineWidth = 1;
-    if(bytes){for(const [x,y,w,h] of patchRects(bytes))c.strokeRect(x+.5,y+.5,w,h);}
+    if (bytes) {
+      for (const [x, y, w, h] of patchRects(bytes)) {
+        const scale = Math.max(w, h) / tile;
+        c.strokeStyle = `rgba(255,255,255,${scale >= 0.75 ? 0.46 : scale >= 0.4 ? 0.25 : 0.12})`;
+        c.lineWidth = 1;
+        c.strokeRect(x + 0.5, y + 0.5, w, h);
+      }
+    }
   }
 }
 async function fileToImageData(file: File) {
@@ -167,6 +172,10 @@ export default function App() {
   const original = useRef<HTMLCanvasElement>(null),
     output = useRef<HTMLCanvasElement>(null),
     worker = useRef<Worker | undefined>(undefined);
+  const patchSizes = result ? patchRects(result.bytes).map(([, , w, h]) => Math.max(w, h)) : [];
+  const distribution = patchSizes.length
+    ? Array.from(new Set(patchSizes)).sort((a, b) => b - a).map((size) => `${size}px: ${patchSizes.filter((value) => value === size).length}枚`).join(" · ")
+    : "";
   useEffect(() => {
     fetch("/pi-10k.txt")
       .then((r) => r.text())
@@ -443,6 +452,7 @@ export default function App() {
                   </strong>
                 </div>
               </div>
+              <p className="patchDistribution">パッチ辺長の内訳（最大辺）: {distribution}</p>
               {source && (
                 <section className="codecCompare">
                   <div className="compareTitle">
