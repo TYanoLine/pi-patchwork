@@ -158,6 +158,7 @@ function ComparisonCard({ comparison }: { comparison: Comparison }) {
 }
 export default function App() {
   const [digits, setDigits] = useState(""),
+    [index, setIndex] = useState<ArrayBuffer>(),
     [source, setSource] = useState<ImageData>(),
     [result, setResult] = useState<EncodeResult>();
   const [originalBytes, setOriginalBytes] = useState<number>();
@@ -177,10 +178,21 @@ export default function App() {
     ? Array.from(new Set(patchSizes)).sort((a, b) => b - a).map((size) => `${size}px: ${patchSizes.filter((value) => value === size).length}枚`).join(" · ")
     : "";
   useEffect(() => {
-    fetch("/pi-10k.txt")
-      .then((r) => r.text())
-      .then(setDigits)
-      .catch(() => setError("円周率辞書を読み込めませんでした"));
+    Promise.all([
+      fetch("/pi-1m.txt").then((r) => {
+        if (!r.ok) throw new Error();
+        return r.text();
+      }),
+      fetch("/pi-index-1m.bin").then((r) => {
+        if (!r.ok) throw new Error();
+        return r.arrayBuffer();
+      }),
+    ])
+      .then(([text, featureIndex]) => {
+        setDigits(text);
+        setIndex(featureIndex);
+      })
+      .catch(() => setError("100万桁の円周率辞書または特徴インデックスを読み込めませんでした"));
     return () => worker.current?.terminate();
   }, []);
   useEffect(() => {
@@ -203,7 +215,7 @@ export default function App() {
     }
   }
   function run() {
-    if (!source || !digits) return;
+    if (!source || !digits || !index) return;
     setBusy(true);
     setError("");
     worker.current?.terminate();
@@ -245,8 +257,10 @@ export default function App() {
       setBusy(false);
       setError("処理中にエラーが発生しました");
     };
-    w.postMessage({ image, digits, savePercent: saving, quality }, [
+    const featureIndex = index.slice(0);
+    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality }, [
       image.data.buffer,
+      featureIndex,
     ]);
   }
   function save() {
@@ -306,7 +320,7 @@ export default function App() {
           円周率で、<em>画像を編み直す。</em>
         </h1>
         <p>
-          円周率の桁を共有パターンとして参照し、2×2〜16×16の内部格子を拡大しながら、色補正・回転・反転・繰り返しで画像を再構成する不可逆コーデックです。
+          円周率100万桁を共有辞書として参照し、特徴インデックスで似た断片を引き、2×2〜16×16の内部格子を拡大しながら画像を再構成する不可逆コーデックです。
         </p>
       </section>
       <section className="workbench">
@@ -333,7 +347,7 @@ export default function App() {
               value={saving}
               onChange={(e) => setSaving(+e.target.value)}
             />
-            <small>非圧縮RGBに対する目標サイズ</small>
+            <small>非圧縮RGBに対する目標サイズ · π辞書 1,000,000桁</small>
           </div>
           <div className="control">
             <span>探索モード</span>
@@ -351,7 +365,7 @@ export default function App() {
           </div>
           <button
             className="primary"
-            disabled={!source || !digits || busy}
+            disabled={!source || !digits || !index || busy}
             onClick={run}
           >
             {busy ? <LoaderCircle className="spin" /> : <Sparkles />}
@@ -500,7 +514,7 @@ export default function App() {
           <li>
             <b>02</b>
             <strong>特徴探索</strong>
-            <p>4×4の色特徴から候補を絞り、2×2〜16×16の内部格子も比較します。</p>
+            <p>色特徴をハッシュ化し、100万桁の索引から近いπ断片だけを候補にします。</p>
           </li>
           <li>
             <b>03</b>
