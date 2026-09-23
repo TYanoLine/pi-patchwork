@@ -167,6 +167,7 @@ export default function App() {
     [comparisonNote, setComparisonNote] = useState("");
   const [saving, setSaving] = useState(10),
     [quality, setQuality] = useState<Quality>(1),
+    [splitPersistence, setSplitPersistence] = useState(55),
     [busy, setBusy] = useState(false),
     [grid, setGrid] = useState(true),
     [error, setError] = useState("");
@@ -258,7 +259,7 @@ export default function App() {
       setError("処理中にエラーが発生しました");
     };
     const featureIndex = index.slice(0);
-    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality }, [
+    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence }, [
       image.data.buffer,
       featureIndex,
     ]);
@@ -362,6 +363,27 @@ export default function App() {
                 </button>
               ))}
             </div>
+          </div>
+          <div className="control">
+            <div>
+              <span>分割粘り</span>
+              <b>{splitPersistence}</b>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="5"
+              value={splitPersistence}
+              onChange={(e) => setSplitPersistence(+e.target.value)}
+            />
+            <small>
+              {splitPersistence < 35
+                ? "大きいパッチを優先。分割は明確に効く時だけ。"
+                : splitPersistence < 70
+                  ? "標準。合わない大パッチは次の分割まで追います。"
+                  : "細部優先。弱い中間分割も許して深く追います。"}
+            </small>
           </div>
           <button
             className="primary"
