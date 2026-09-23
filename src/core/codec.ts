@@ -5,7 +5,8 @@ export const RECORD_BYTES = 12;
 const MAGIC = [0x50, 0x49, 0x50, 0x57];
 const FORMAT_VERSION = 4;
 const DICTIONARY_ID = 1;
-export type EncodedStats = { budgetBytes:number; actualBytes:number; ratio:number; tileSize:number; patches:number; piPatches:number; mse:number; psnr:number };
+export type EncodeObjective = 'quality'|'dictionary';
+export type EncodedStats = { budgetBytes:number; actualBytes:number; ratio:number; tileSize:number; patches:number; piPatches:number; piCoverage:number; pixelsPerByte:number; budgetUse:number; objective:EncodeObjective; mse:number; psnr:number };
 export type EncodeResult = { bytes:Uint8Array; image:ImageData; stats:EncodedStats };
 export type EncodePreviewPatch = { x:number; y:number; width:number; height:number; pixels:Uint8ClampedArray };
 export type EncodeProgress = {
@@ -135,12 +136,12 @@ function principalDescriptor(target:Float64Array){
 function descriptorScore(target:Float64Array,d:Uint8Array,c:Omit<Candidate,'score'>,tw:number,th:number){
   let sx=0,sxx=0,score=0;const q=new Float64Array(16);for(let i=0;i<16;i++){const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4));q[i]=qAt(d,c.offset,x,y,c.transform,c.repeat,c.phase,c.sourceSize,tw,th);sx+=q[i];sxx+=q[i]*q[i];}const den=16*sxx-sx*sx;for(let ch=0;ch<3;ch++){let sy=0,sxy=0;for(let i=0;i<16;i++){sy+=target[ch*16+i];sxy+=q[i]*target[ch*16+i];}const g=den?(16*sxy-sx*sy)/den:0,b=(sy-g*sx)/16;for(let i=0;i<16;i++){const delta=target[ch*16+i]-(b+g*q[i]);score+=delta*delta;}}return score;
 }
-function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number){
+function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective){
   const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),scored:Candidate[]=[];
   const transforms=quality===0?[0,2]:quality===1?[0,1,2,3]:[0,1,2,3,4,5,6,7],hashes=new Set<number>(),mask=(1<<index.bucketBits)-1;
   for(const transform of transforms){const hash=transformedFeatureHash(feature,transform);hashes.add(hash);hashes.add(hash^mask);}
   const slotLimit=quality===0?2:quality===1?4:8,keep=quality===0?96:quality===1?192:384,fallback=quality===0?4:quality===1?8:16,repeatCount=quality===0?2:3,phaseCount=quality===0?2:4;
-  const sourceCodes=(quality===0?[0,1,2]:[0,1,2,3]).filter(code=>PI_SOURCE_SIZES[code]<=Math.max(tw,th)&&PI_SOURCE_SIZES[code]**2<=d.length);
+  const sourceCodes=(objective==='dictionary'?[2,3]:quality===0?[0,1,2]:[0,1,2,3]).filter(code=>PI_SOURCE_SIZES[code]<=Math.max(tw,th)&&PI_SOURCE_SIZES[code]**2<=d.length);
   for(const sourceCode of sourceCodes){
     const sourceSize=PI_SOURCE_SIZES[sourceCode],maxOffset=d.length-sourceSize*sourceSize,offsets=new Set<number>();
     for(const hash of hashes)for(const offset of indexedOffsets(index,sourceCode,hash,slotLimit))if(offset<=maxOffset)offsets.add(offset);
@@ -153,11 +154,25 @@ function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:nu
   scored.sort((a,b)=>a.score-b.score);
   return scored.slice(0,keep);
 }
-function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number){
-  let out=solid(data,width,x0,y0,tw,th),bestError=reconstructionError(out,data,width,x0,y0,tw,th,d),slope=gradient(data,width,x0,y0,tw,th),slopeError=reconstructionError(slope,data,width,x0,y0,tw,th,d);
-  if(slopeError<bestError){out=slope;bestError=slopeError;}
-  if(bestError<tw*th*3) return out;
-  for(const candidate of shortlist(data,width,x0,y0,tw,th,d,index,quality)){const record=fit(data,width,x0,y0,tw,th,d,candidate),error=reconstructionError(record,data,width,x0,y0,tw,th,d);if(error<bestError){bestError=error;out=record;}}return out;
+function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,compressionPriority:number){
+  let model=solid(data,width,x0,y0,tw,th),modelError=reconstructionError(model,data,width,x0,y0,tw,th,d),
+    slope=gradient(data,width,x0,y0,tw,th),slopeError=reconstructionError(slope,data,width,x0,y0,tw,th,d);
+  if(slopeError<modelError){model=slope;modelError=slopeError;}
+  if(objective==='quality'&&modelError<tw*th*3)return model;
+  let piRecord:Record|undefined,piError=Infinity;
+  for(const candidate of shortlist(data,width,x0,y0,tw,th,d,index,quality,objective)){
+    const record=fit(data,width,x0,y0,tw,th,d,candidate),
+      error=reconstructionError(record,data,width,x0,y0,tw,th,d);
+    if(error<piError){piError=error;piRecord=record;}
+  }
+  if(!piRecord)return model;
+  if(piError<modelError)return piRecord;
+  if(objective==='dictionary'){
+    const priority=Math.max(0,Math.min(100,compressionPriority))/100,
+      tolerance=1.15+priority*.55;
+    if(modelError>0&&piError<=modelError*tolerance)return piRecord;
+  }
+  return model;
 }
 type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; children?:Region[]; tried?:boolean };
 function partition(x:number,y:number,w:number,h:number){const a=Math.floor(w/2),b=Math.floor(h/2);return[[x,y,a,b],[x+a,y,w-a,b],[x,y+b,a,h-b],[x+a,y+b,w-a,h-b]] as const;}
@@ -178,14 +193,18 @@ function pairSeamMismatch(a:Region,b:Region,data:Uint8ClampedArray,width:number,
 function seamPenalty(leaves:Region[],data:Uint8ClampedArray,width:number,digits:Uint8Array){
   let total=0;for(let i=0;i<leaves.length;i++)for(let j=i+1;j<leaves.length;j++)total+=pairSeamMismatch(leaves[i],leaves[j],data,width,digits);return total;
 }
-export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50,minPatchSize=4,hooks?:EncodeHooks):EncodeResult {
+export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50,minPatchSize=4,objective:EncodeObjective='quality',compressionPriority=70,hooks?:EncodeHooks):EncodeResult {
   if(!digits.length||digits.length>0xffffffff||index.digitCount!==digits.length||source.width>65535||source.height>65535)throw new Error('画像・円周率辞書・特徴インデックスが一致しません');
   const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+13,Math.floor(raw*savePercent/100));
   if(![4,8,16,32].includes(minPatchSize))throw new Error('最小パッチサイズが不正です');
+  if(objective!=='quality'&&objective!=='dictionary')throw new Error('最適化目標が不正です');
   const persistence=Math.max(0,Math.min(100,splitPersistence))/100,
+    priority=Math.max(0,Math.min(100,compressionPriority))/100,
     lookaheadChildren=splitPersistence<=0?0:Math.max(1,Math.min(4,Math.ceil(persistence*4))),
-    minRelativeGain=.045,
-    minGainPerSample=.75;
+    minRelativeGain=objective==='dictionary'?.06+.12*priority:.045,
+    minGainPerSample=objective==='dictionary'?1.1+1.5*priority:.75,
+    minEfficiency=objective==='dictionary'?70+120*priority:0,
+    areaPower=objective==='dictionary'?.58+.22*priority:.5;
   const started=performance.now();
   let tile=Math.max(16,Math.min(64,Math.ceil(Math.max(source.width,source.height)/8))),cols=Math.ceil(source.width/tile),rows=Math.ceil(source.height/tile);
   while(HEADER_BYTES+cols*rows*13>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
@@ -201,7 +220,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     pendingPreview.length=0;
     return preview;
   };
-  const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
+  const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality,objective,compressionPriority);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
   const roots:Region[]=[],leaves:Region[]=[];let rootDone=0;
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){
     const x=gx*tile,y=gy*tile,node=make(x,y,Math.min(tile,source.width-x),Math.min(tile,source.height-y));roots.push(node);leaves.push(node);rootDone++;
@@ -211,7 +230,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
   while(size+40<=budget){
     let selected:Region|undefined,priority=0;
     for(const node of leaves)if(!node.tried&&canSplit(node,minPatchSize)){
-      const area=node.w*node.h,errorDensity=node.error/(area*3),score=errorDensity*Math.sqrt(area);
+      const area=node.w*node.h,errorDensity=node.error/(area*3),score=errorDensity*Math.pow(area,areaPower);
       if(score>priority){selected=node;priority=score;}
     }
     if(!selected)break;
@@ -224,7 +243,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
       directGain=directReduction/samples,
       directEff=directReduction/40;
     let bestPlan:{children:Region[];leaves:Region[];extraBytes:number;reduction:number;efficiency:number;splitChild?:Region;grandchildren?:Region[]}|undefined;
-    if(directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample)bestPlan={children,leaves:children,extraBytes:40,reduction:directReduction,efficiency:directEff};
+    if(directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample&&directEff>=minEfficiency)bestPlan={children,leaves:children,extraBytes:40,reduction:directReduction,efficiency:directEff};
 
     // Speculative lookahead: temporarily split the hardest children. Nothing is committed
     // until the two-level plan beats the parent after seam cost and byte cost are included.
@@ -238,7 +257,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
           relative=selected.error?reduction/selected.error:0,
           gain=reduction/samples,
           efficiency=reduction/80;
-        if(reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&(!bestPlan||efficiency>bestPlan.efficiency)){
+        if(reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&efficiency>=minEfficiency*.85&&(!bestPlan||efficiency>bestPlan.efficiency)){
           bestPlan={children,leaves:planLeaves,extraBytes:80,reduction,efficiency,splitChild:child,grandchildren};
         }
       }
@@ -265,9 +284,11 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
   };
   roots.forEach(write);
   if(cursor!==bytes.length)throw new Error('サイズ計算が一致しません');
-  const image=decode(bytes,digits),mse=mseOf(source,image),psnr=mse?10*Math.log10(255*255/mse):Infinity;
+  const image=decode(bytes,digits),mse=mseOf(source,image),psnr=mse?10*Math.log10(255*255/mse):Infinity,
+    piLeaves=leaves.filter(r=>!r.record.solid&&!r.record.gradient),
+    piPixels=piLeaves.reduce((sum,r)=>sum+r.w*r.h,0);
   emit({phase:'final',overall:1,done:bytes.length,total:budget,attempts,patches:leaves.length,bytes:bytes.length,budget});
-  return{bytes,image,stats:{budgetBytes:budget,actualBytes:bytes.length,ratio:bytes.length/raw*100,tileSize:tile,patches:leaves.length,piPatches:leaves.filter(r=>!r.record.solid&&!r.record.gradient).length,mse,psnr}};
+  return{bytes,image,stats:{budgetBytes:budget,actualBytes:bytes.length,ratio:bytes.length/raw*100,tileSize:tile,patches:leaves.length,piPatches:piLeaves.length,piCoverage:piPixels/(source.width*source.height)*100,pixelsPerByte:source.width*source.height/bytes.length,budgetUse:bytes.length/budget*100,objective,mse,psnr}};
 }
 export function decode(bytes:Uint8Array,digits:Uint8Array):ImageData {
   const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
