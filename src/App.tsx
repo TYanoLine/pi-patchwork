@@ -44,17 +44,18 @@ function mergePreview(raw: ImageData, progress: EncodeProgress) {
 function updatePreviewRects(current: PatchRect[], progress: EncodeProgress) {
   const patches = progress.preview ?? [];
   if (!patches.length) return current;
-  const x0 = Math.min(...patches.map((p) => p.x)),
-    y0 = Math.min(...patches.map((p) => p.y)),
-    x1 = Math.max(...patches.map((p) => p.x + p.width)),
-    y1 = Math.max(...patches.map((p) => p.y + p.height));
-  const keep = current.filter(
-    ([x, y, w, h]) => !(x >= x0 && y >= y0 && x + w <= x1 && y + h <= y1),
-  );
-  return [
-    ...keep,
-    ...patches.map((p) => [p.x, p.y, p.width, p.height] as PatchRect),
-  ];
+  const contains = (a: PatchRect, b: PatchRect) =>
+    b[0] >= a[0] &&
+    b[1] >= a[1] &&
+    b[0] + b[2] <= a[0] + a[2] &&
+    b[1] + b[3] <= a[1] + a[3];
+  let next = [...current];
+  for (const patch of patches) {
+    const rect: PatchRect = [patch.x, patch.y, patch.width, patch.height];
+    next = next.filter((existing) => !contains(existing, rect) && !contains(rect, existing));
+    next.push(rect);
+  }
+  return next;
 }
 function draw(
   canvas: HTMLCanvasElement | null,
