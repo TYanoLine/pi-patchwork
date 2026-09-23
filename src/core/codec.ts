@@ -172,7 +172,7 @@ function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:nu
   scored.sort((a,b)=>a.score-b.score);
   return scored.slice(0,keep);
 }
-function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,compressionPriority:number){
+function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,compressionPriority:number,piComposition:number){
   let model=solid(data,width,x0,y0,tw,th),modelError=reconstructionError(model,data,width,x0,y0,tw,th,d),
     slope=gradient(data,width,x0,y0,tw,th),slopeError=reconstructionError(slope,data,width,x0,y0,tw,th,d);
   if(slopeError<modelError){model=slope;modelError=slopeError;}
@@ -187,7 +187,9 @@ function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,
   if(piError<modelError)return piRecord;
   if(objective==='dictionary'){
     const priority=Math.max(0,Math.min(100,compressionPriority))/100,
-      tolerance=1.15+priority*.55;
+      piPreference=Math.max(0,Math.min(100,piComposition))/100;
+    if(piPreference>=1)return piRecord;
+    const tolerance=1.15+priority*.55+Math.pow(piPreference,1.7)*6.5;
     if(modelError>0&&piError<=modelError*tolerance)return piRecord;
   }
   return model;
@@ -226,11 +228,12 @@ function pairSeamMismatch(a:Region,b:Region,data:Uint8ClampedArray,width:number,
 function seamPenalty(leaves:Region[],data:Uint8ClampedArray,width:number,digits:Uint8Array){
   let total=0;for(let i=0;i<leaves.length;i++)for(let j=i+1;j<leaves.length;j++)total+=pairSeamMismatch(leaves[i],leaves[j],data,width,digits);return total;
 }
-export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50,minPatchSize=4,objective:EncodeObjective='quality',compressionPriority=70,hooks?:EncodeHooks):EncodeResult {
+export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50,minPatchSize=4,objective:EncodeObjective='quality',compressionPriority=70,piComposition=90,hooks?:EncodeHooks):EncodeResult {
   if(!digits.length||digits.length>0xffffffff||index.digitCount!==digits.length||source.width>65535||source.height>65535)throw new Error('画像・円周率辞書・特徴インデックスが一致しません');
   const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+1+GRADIENT_RECORD_BYTES,Math.floor(raw*savePercent/100));
   if(![4,8,16,32].includes(minPatchSize))throw new Error('最小パッチサイズが不正です');
   if(objective!=='quality'&&objective!=='dictionary')throw new Error('最適化目標が不正です');
+  if(!Number.isFinite(piComposition)||piComposition<0||piComposition>100)throw new Error('π構成率が不正です');
   const persistence=Math.max(0,Math.min(100,splitPersistence))/100,
     compression=Math.max(0,Math.min(100,compressionPriority))/100,
     lookaheadChildren=splitPersistence<=0?0:Math.max(1,Math.min(4,Math.ceil(persistence*4))),
@@ -253,7 +256,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     pendingPreview.length=0;
     return preview;
   };
-  const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality,objective,compressionPriority);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
+  const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality,objective,compressionPriority,piComposition);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
   const roots:Region[]=[],leaves:Region[]=[];let rootDone=0,rootBytes=0;
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){
     const x=gx*tile,y=gy*tile,node=make(x,y,Math.min(tile,source.width-x),Math.min(tile,source.height-y));
