@@ -273,6 +273,8 @@ export default function App() {
     deblockRef = useRef(true),
     gridRef = useRef(true),
     inspectAnchor = useRef<{x:number; y:number; left:number; top:number; pinned:boolean} | undefined>(undefined),
+    patchTooltip = useRef<HTMLDivElement>(null),
+    dismissedTouchPointer = useRef<number | undefined>(undefined),
     sourceChosen = useRef(false);
   const parsedIndex = useMemo(() => index ? parsePiIndex(index) : undefined, [index]);
   const patchDetails = useMemo(() => result && parsedIndex ? patchInfos(result.bytes, parsedIndex) : [], [result, parsedIndex]);
@@ -317,6 +319,19 @@ export default function App() {
     if (source) draw(original.current, source);
   }, [source]);
   useEffect(() => {
+    if (!hoveredPatch || !inspectAnchor.current?.pinned) return;
+    const dismissOutside = (event: PointerEvent) => {
+      if (event.pointerType === "mouse") return;
+      const target = event.target;
+      if (target instanceof Node && patchTooltip.current?.contains(target)) return;
+      dismissedTouchPointer.current = event.pointerId;
+      inspectAnchor.current = undefined;
+      setHoveredPatch(undefined);
+    };
+    document.addEventListener("pointerdown", dismissOutside, true);
+    return () => document.removeEventListener("pointerdown", dismissOutside, true);
+  }, [hoveredPatch]);
+  useEffect(() => {
     deblockRef.current = deblock;
     gridRef.current = grid;
     if (result) {
@@ -359,16 +374,9 @@ export default function App() {
   }
   function inspectPatchPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (event.type === "pointermove" && event.pointerType !== "mouse") return;
-    if (event.type === "pointerdown" && event.pointerType !== "mouse" && inspectAnchor.current?.pinned && hoveredPatch) {
-      const rect = event.currentTarget.getBoundingClientRect(),
-        x = ((event.clientX - rect.left) * event.currentTarget.width) / rect.width,
-        y = ((event.clientY - rect.top) * event.currentTarget.height) / rect.height,
-        current = hoveredPatch.info;
-      if (x >= current.x && x < current.x + current.width && y >= current.y && y < current.y + current.height) {
-        inspectAnchor.current = undefined;
-        setHoveredPatch(undefined);
-        return;
-      }
+    if (event.type === "pointerdown" && event.pointerType !== "mouse" && dismissedTouchPointer.current === event.pointerId) {
+      dismissedTouchPointer.current = undefined;
+      return;
     }
     inspectPatchAt(event.currentTarget, event.clientX, event.clientY, event.pointerType !== "mouse");
   }
@@ -766,7 +774,7 @@ export default function App() {
                 </div>
               )}
               {grid && hoveredPatch && (
-                <div className="patchTooltip" style={{ left: hoveredPatch.left, top: hoveredPatch.top }}>
+                <div ref={patchTooltip} className="patchTooltip" style={{ left: hoveredPatch.left, top: hoveredPatch.top }}>
                   <div className="patchTooltipHead">
                     <strong>{busy && !result ? "LIVE " : ""}PATCH #{hoveredPatch.info.index}</strong>
                     <span>{hoveredPatch.info.mode.toUpperCase()} · {hoveredPatch.info.width}×{hoveredPatch.info.height}px · {hoveredPatch.info.totalBytes}B</span>
