@@ -22,7 +22,8 @@ export type PatchInfo = {
   transform?:number; repeat?:number; phase?:number; bucket?:number; slot?:number;
   gradientY?:[number,number,number];
 };
-export type EncodePreviewPatch = { x:number; y:number; width:number; height:number; pixels:Uint8ClampedArray };
+export type LivePatchInfo = Omit<PatchInfo,'index'>;
+export type EncodePreviewPatch = { x:number; y:number; width:number; height:number; pixels:Uint8ClampedArray; info:LivePatchInfo };
 export type EncodeProgress = {
   phase:'roots'|'refine'|'final';
   overall:number;
@@ -100,13 +101,33 @@ function pixel(r:Record,d:Uint8Array,x:number,y:number,tw:number,th:number,ch:nu
 }
 function rSlopeY(r:Record,ch:number){return ((r.offset>>(ch*8))&255)<<24>>24;}
 function renderRegion(region:Region,digits:Uint8Array):EncodePreviewPatch {
-  const pixels=new Uint8ClampedArray(region.w*region.h*4);
+  const pixels=new Uint8ClampedArray(region.w*region.h*4),record=region.record,
+    mode:PatchInfo['mode']=record.gradient?'gradient':record.solid?'solid':'pi',
+    payloadBytes=record.gradient?GRADIENT_RECORD_BYTES:record.solid?SOLID_RECORD_BYTES:RECORD_BYTES,
+    info:LivePatchInfo={
+      x:region.x,y:region.y,width:region.w,height:region.h,mode,payloadBytes,totalBytes:1+payloadBytes,
+      bias:[...record.bias] as [number,number,number],
+      gain:[...record.gain] as [number,number,number],
+    };
+  if(mode==='pi'){
+    info.offset=record.offset;
+    info.digitStart=record.offset+1;
+    info.digitCount=record.sourceSize*record.sourceSize;
+    info.sourceSize=record.sourceSize;
+    info.transform=record.transform;
+    info.repeat=record.repeat;
+    info.phase=record.phase;
+    info.bucket=record.bucket;
+    info.slot=record.slot;
+  } else if(mode==='gradient'){
+    info.gradientY=[rSlopeY(record,0),rSlopeY(record,1),rSlopeY(record,2)];
+  }
   for(let y=0;y<region.h;y++)for(let x=0;x<region.w;x++){
     const p=(y*region.w+x)*4;
-    for(let ch=0;ch<3;ch++)pixels[p+ch]=pixel(region.record,digits,x,y,region.w,region.h,ch);
+    for(let ch=0;ch<3;ch++)pixels[p+ch]=pixel(record,digits,x,y,region.w,region.h,ch);
     pixels[p+3]=255;
   }
-  return{x:region.x,y:region.y,width:region.w,height:region.h,pixels};
+  return{x:region.x,y:region.y,width:region.w,height:region.h,pixels,info};
 }
 function fit(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,c:Candidate):Record {
   let sw=0,sq=0,sq2=0;const sy=[0,0,0],sqy=[0,0,0];
