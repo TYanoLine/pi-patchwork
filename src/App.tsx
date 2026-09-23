@@ -598,7 +598,7 @@ export default function App() {
             disabled={!source || !digits || !index || busy}
             onClick={run}
           >
-            {busy ? <LoaderCircle className="spin" /> : <Sparkles />}
+            {busy && <LoaderCircle className="spin" />}
             {busy ? "探索中…" : "再構成する"}
           </button>
           {busy && (
@@ -682,7 +682,6 @@ export default function App() {
                 />
               ) : (
                 <div>
-                  <Pi />
                   <span>再構成結果</span>
                 </div>
               )}
