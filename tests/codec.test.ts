@@ -18,6 +18,9 @@ const index:PiIndex={bucketBits:12,slots:1,digitCount:digits.length,entries:inde
 const denseEntries=new Uint32Array(4*(1<<12)).fill(PI_INDEX_EMPTY);
 for(let sourceCode=2;sourceCode<=3;sourceCode++)for(let bucket=0;bucket<(1<<12);bucket++)denseEntries[sourceCode*(1<<12)+bucket]=0;
 const denseIndex:PiIndex={bucketBits:12,slots:1,digitCount:digits.length,entries:denseEntries};
+const largeOnlyEntries=new Uint32Array(4*(1<<12)).fill(PI_INDEX_EMPTY);
+for(let bucket=0;bucket<(1<<12);bucket++)largeOnlyEntries[3*(1<<12)+bucket]=0;
+const largeOnlyIndex:PiIndex={bucketBits:12,slots:1,digitCount:digits.length,entries:largeOnlyEntries};
 
 function sample(w=32,h=24){const d=new Uint8ClampedArray(w*h*4);for(let y=0;y<h;y++)for(let x=0;x<w;x++){const p=(y*w+x)*4;d[p]=x*7%256;d[p+1]=y*11%256;d[p+2]=(x+y)*5%256;d[p+3]=255;}return new ImageData(d,w,h);}
 
@@ -39,6 +42,8 @@ describe('pipw codec',()=>{
   it('rejects unsupported minimum patch sizes',()=>expect(()=>encode(sample(),digits,index,20,0,50,12)).toThrow());
   it('dictionary-first can stop below budget and higher priority never spends more',()=>{const src=sample(128,128);for(let y=0;y<128;y++)for(let x=0;x<128;x++){const p=(y*128+x)*4,v=x<64?x*2:(x*47+y*29)%256;src.data[p]=v;src.data[p+1]=(v*3)%256;src.data[p+2]=(v*7)%256;}const low=encode(src,digits,index,50,0,100,16,'dictionary',0),high=encode(src,digits,index,50,0,100,16,'dictionary',100);expect(high.bytes.length).toBeLessThanOrEqual(low.bytes.length);expect(high.stats.budgetUse).toBeLessThan(100);expect(high.stats.pixelsPerByte).toBeCloseTo((128*128)/high.bytes.length);expect(high.stats.objective).toBe('dictionary');});
   it('pi composition preference can force dictionary coverage',()=>{const src=sample(64,64);for(let y=0;y<64;y++)for(let x=0;x<64;x++){const p=(y*64+x)*4;src.data[p]=40+x*2+y;src.data[p+1]=30+x+y*2;src.data[p+2]=70+x+y;src.data[p+3]=255;}const low=encode(src,digits,denseIndex,50,0,0,16,'dictionary',0,0),high=encode(src,digits,denseIndex,50,0,0,16,'dictionary',0,100);expect(high.stats.piCoverage).toBeGreaterThan(low.stats.piCoverage);expect(high.stats.piCoverage).toBeGreaterThan(90);expect(high.stats.piPatches).toBe(high.stats.patches);});
+  it('pi preference 100 refuses splits that would replace pi with fallback leaves',()=>{const src=sample(64,64),r=encode(src,digits,largeOnlyIndex,50,0,100,4,'dictionary',0,100);expect(r.stats.piCoverage).toBe(100);expect(r.stats.piPatches).toBe(r.stats.patches);expect(r.stats.patches).toBe(16);});
+  it('high pi preference unlocks small source grids instead of falling back on small leaves',()=>{const smallEntries=new Uint32Array(4*(1<<12)).fill(PI_INDEX_EMPTY);for(let bucket=0;bucket<(1<<12);bucket++)smallEntries[bucket]=0;const smallIndex:PiIndex={bucketBits:12,slots:1,digitCount:digits.length,entries:smallEntries},src=sample(32,32),r=encode(src,digits,smallIndex,50,0,100,4,'dictionary',0,100);expect(r.stats.piCoverage).toBe(100);expect(r.stats.piPatches).toBe(r.stats.patches);});
 
   it('rejects a corrupt payload',()=>expect(()=>decode(new Uint8Array(HEADER_BYTES+RECORD_BYTES),digits,index)).toThrow());
   it('scores visual error instead of exact byte matches',()=>expect(encode(sample(16,16),digits,index,50,1).stats.mse).toBeGreaterThanOrEqual(0));
