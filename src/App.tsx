@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
 import { decode, mseOf, parseDigits, patchInfos, patchRects, type EncodeObjective, type EncodeProgress, type EncodeResult, type PatchInfo } from "./core/codec";
 import { deblockImage, type PatchRect } from "./core/deblock";
@@ -302,15 +302,14 @@ export default function App() {
       drawOutput(output.current, rawPreview.current, deblock, previewRects.current);
     }
   }, [result, grid, deblock, busy]);
-  function inspectPatch(event: ReactMouseEvent<HTMLCanvasElement>) {
+  function inspectPatchAt(canvas: HTMLCanvasElement, clientX: number, clientY: number) {
     if (!grid || !result || !patchDetails.length) {
       setHoveredPatch(undefined);
       return;
     }
-    const canvas = event.currentTarget,
-      canvasRect = canvas.getBoundingClientRect(),
-      x = ((event.clientX - canvasRect.left) * canvas.width) / canvasRect.width,
-      y = ((event.clientY - canvasRect.top) * canvas.height) / canvasRect.height,
+    const canvasRect = canvas.getBoundingClientRect(),
+      x = ((clientX - canvasRect.left) * canvas.width) / canvasRect.width,
+      y = ((clientY - canvasRect.top) * canvas.height) / canvasRect.height,
       info = patchDetails.find((patch) => x >= patch.x && x < patch.x + patch.width && y >= patch.y && y < patch.y + patch.height);
     if (!info) {
       setHoveredPatch(undefined);
@@ -318,10 +317,14 @@ export default function App() {
     }
     const figure = canvas.parentElement!,
       figureRect = figure.getBoundingClientRect(),
-      width = 300,
-      left = Math.max(8, Math.min(event.clientX - figureRect.left + 14, figureRect.width - width - 8)),
-      top = Math.max(8, Math.min(event.clientY - figureRect.top + 14, figureRect.height - 210));
+      width = Math.min(300, Math.max(220, figureRect.width - 16)),
+      left = Math.max(8, Math.min(clientX - figureRect.left + 14, figureRect.width - width - 8)),
+      top = Math.max(8, Math.min(clientY - figureRect.top + 14, figureRect.height - 210));
     setHoveredPatch({ info, left, top });
+  }
+  function inspectPatchPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
+    if (event.type === "pointermove" && event.pointerType !== "mouse") return;
+    inspectPatchAt(event.currentTarget, event.clientX, event.clientY);
   }
   async function pick(file?: File) {
     if (!file) return;
@@ -467,7 +470,6 @@ export default function App() {
           <b>PI PATCHWORK</b>
           <span>visual codec experiment</span>
         </div>
-        <a href="#how">How it works</a>
       </header>
       <section className="hero">
         <p className="eyebrow">
@@ -476,9 +478,6 @@ export default function App() {
         <h1>
           円周率で、<em>画像を編み直す。</em>
         </h1>
-        <p>
-          円周率100万桁を共有辞書として参照し、特徴インデックスで似た断片を引き、2×2〜16×16の内部格子を拡大しながら画像を再構成する不可逆コーデックです。
-        </p>
       </section>
       <section className="workbench">
         <aside>
@@ -510,9 +509,6 @@ export default function App() {
                 画質優先
               </button>
             </div>
-            <small>
-              辞書優先は大きな領域をπ参照で置き換え、追加byte効率の悪い分割を予算が余っていても止めます。
-            </small>
           </div>
           <div className="control">
             <div>
@@ -526,7 +522,6 @@ export default function App() {
               value={saving}
               onChange={(e) => setSaving(+e.target.value)}
             />
-            <small>非圧縮RGBに対する最大サイズ。辞書優先では効率が悪ければこの上限より手前で停止します。</small>
           </div>
           {objective === "dictionary" && (
             <>
@@ -543,9 +538,6 @@ export default function App() {
                   value={compressionPriority}
                   onChange={(e) => setCompressionPriority(+e.target.value)}
                 />
-                <small>
-                  高いほど大きなパッチを保ち、1 byteあたりの改善が小さい分割を強く捨てます。
-                </small>
               </div>
               <div className="control">
                 <div>
@@ -560,9 +552,6 @@ export default function App() {
                   value={piComposition}
                   onChange={(e) => setPiComposition(+e.target.value)}
                 />
-                <small>
-                  高いほど小さいπ source gridまで解禁し、候補探索を広げ、πを失う分割を抑えます。100ではπ候補がある領域をできるだけπのまま維持します。実測は「π辞書カバー率」で確認できます。
-                </small>
               </div>
             </>
           )}
@@ -593,11 +582,6 @@ export default function App() {
               value={splitPersistence}
               onChange={(e) => setSplitPersistence(+e.target.value)}
             />
-            <small>
-              {splitPersistence === 0
-                ? "1段だけ評価。追加の先読みをしません。"
-                : `弱い分割では難しい子を最大${Math.max(1, Math.min(4, Math.ceil(splitPersistence / 25)))}枚、さらに1段だけ仮探索。改善しなければ親へ戻します。`}
-            </small>
           </div>
           <div className="control">
             <span>最小パッチサイズ</span>
@@ -613,9 +597,6 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <small>
-              空間パッチの下限。小さいほど細部を追えますが、探索時間と境界数が増えます。
-            </small>
           </div>
           <button
             className="primary"
@@ -698,8 +679,11 @@ export default function App() {
               {result || busy ? (
                 <canvas
                   ref={output}
-                  onMouseMove={inspectPatch}
-                  onMouseLeave={() => setHoveredPatch(undefined)}
+                  onPointerMove={inspectPatchPointer}
+                  onPointerDown={inspectPatchPointer}
+                  onPointerLeave={(event) => {
+                    if (event.pointerType === "mouse") setHoveredPatch(undefined);
+                  }}
                 />
               ) : (
                 <div>
@@ -841,37 +825,7 @@ export default function App() {
           )}
         </div>
       </section>
-      <section className="how" id="how">
-        <span>HOW IT WORKS</span>
-        <h2>
-          画像ではなく、<em>作り方</em>を保存する。
-        </h2>
-        <ol>
-          <li>
-            <b>01</b>
-            <strong>分割</strong>
-          <p>細部は小さく、なめらかな場所は大きなパッチに分けます。</p>
-          </li>
-          <li>
-            <b>02</b>
-            <strong>特徴探索</strong>
-            <p>色特徴をハッシュ化し、100万桁の索引から近いπ断片だけを候補にします。</p>
-          </li>
-          <li>
-            <b>03</b>
-            <strong>補正</strong>
-          <p>単色・グラデーション・π模様から選び、色や向きを調整します。</p>
-          </li>
-          <li>
-            <b>04</b>
-            <strong>再構成</strong>
-            <p>境界も評価して参照値から描き直します。</p>
-          </li>
-        </ol>
-      </section>
-      <footer>
-        πの正規性や圧縮効率は保証されません。画像はブラウザ内だけで処理されます。
-      </footer>
+
     </main>
   );
 }
