@@ -462,15 +462,6 @@ export default function App() {
   }
   return (
     <main>
-      <header>
-        <div className="mark">
-          <Pi />
-        </div>
-        <div>
-          <b>PI PATCHWORK</b>
-          <span>visual codec experiment</span>
-        </div>
-      </header>
       <section className="workbench">
         <aside>
           <label className="drop">
@@ -695,7 +686,6 @@ export default function App() {
                   <span>再構成結果</span>
                 </div>
               )}
-              <figcaption>PI PATCHWORK</figcaption>
               {grid && hoveredPatch && (
                 <div className="patchTooltip" style={{ left: hoveredPatch.left, top: hoveredPatch.top }}>
                   <div className="patchTooltipHead">
