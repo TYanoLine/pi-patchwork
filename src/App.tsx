@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
-import { decode, mseOf, parseDigits, patchRects, type EncodeObjective, type EncodeProgress, type EncodeResult } from "./core/codec";
+import { decode, mseOf, parseDigits, patchInfos, patchRects, type EncodeObjective, type EncodeProgress, type EncodeResult, type PatchInfo } from "./core/codec";
 import { deblockImage, type PatchRect } from "./core/deblock";
 import { parsePiIndex } from "./core/piIndex";
 
@@ -21,6 +21,13 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes.toLocaleString()} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+function transformLabel(transform: number) {
+  const rotation = [0, 90, 180, 270][transform & 3];
+  return `${transform & 4 ? "左右反転 + " : ""}${rotation}°`;
+}
+function triplet(values: [number, number, number]) {
+  return `[${values.join(", ")}]`;
 }
 function blankPreview(width: number, height: number) {
   const data = new Uint8ClampedArray(width * height * 4);
@@ -228,6 +235,7 @@ export default function App() {
     [busy, setBusy] = useState(false),
     [deblock, setDeblock] = useState(true),
     [grid, setGrid] = useState(true),
+    [hoveredPatch, setHoveredPatch] = useState<{info:PatchInfo; left:number; top:number}>(),
     [error, setError] = useState("");
   const original = useRef<HTMLCanvasElement>(null),
     output = useRef<HTMLCanvasElement>(null),
@@ -236,6 +244,8 @@ export default function App() {
     previewRects = useRef<PatchRect[]>([]),
     deblockRef = useRef(true),
     sourceChosen = useRef(false);
+  const parsedIndex = useMemo(() => index ? parsePiIndex(index) : undefined, [index]);
+  const patchDetails = useMemo(() => result && parsedIndex ? patchInfos(result.bytes, parsedIndex) : [], [result, parsedIndex]);
   const patchSizes = result ? patchRects(result.bytes).map(([, , w, h]) => Math.max(w, h)) : [];
   const distribution = patchSizes.length
     ? Array.from(new Set(patchSizes)).sort((a, b) => b - a).map((size) => `${size}px: ${patchSizes.filter((value) => value === size).length}枚`).join(" · ")
@@ -292,6 +302,27 @@ export default function App() {
       drawOutput(output.current, rawPreview.current, deblock, previewRects.current);
     }
   }, [result, grid, deblock, busy]);
+  function inspectPatch(event: ReactMouseEvent<HTMLCanvasElement>) {
+    if (!grid || !result || !patchDetails.length) {
+      setHoveredPatch(undefined);
+      return;
+    }
+    const canvas = event.currentTarget,
+      canvasRect = canvas.getBoundingClientRect(),
+      x = ((event.clientX - canvasRect.left) * canvas.width) / canvasRect.width,
+      y = ((event.clientY - canvasRect.top) * canvas.height) / canvasRect.height,
+      info = patchDetails.find((patch) => x >= patch.x && x < patch.x + patch.width && y >= patch.y && y < patch.y + patch.height);
+    if (!info) {
+      setHoveredPatch(undefined);
+      return;
+    }
+    const figure = canvas.parentElement!,
+      figureRect = figure.getBoundingClientRect(),
+      width = 300,
+      left = Math.max(8, Math.min(event.clientX - figureRect.left + 14, figureRect.width - width - 8)),
+      top = Math.max(8, Math.min(event.clientY - figureRect.top + 14, figureRect.height - 210));
+    setHoveredPatch({ info, left, top });
+  }
   async function pick(file?: File) {
     if (!file) return;
     sourceChosen.current = true;
@@ -396,7 +427,7 @@ export default function App() {
     sourceChosen.current = true;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer()),
-        image = decode(bytes, parseDigits(digits), parsePiIndex(index)),
+        image = decode(bytes, parseDigits(digits), parsedIndex!),
         v = new DataView(bytes.buffer);
       setSource(undefined);
       rawPreview.current = undefined;
@@ -665,7 +696,11 @@ export default function App() {
             </figure>
             <figure className={!result && !busy ? "empty" : ""}>
               {result || busy ? (
-                <canvas ref={output} />
+                <canvas
+                  ref={output}
+                  onMouseMove={inspectPatch}
+                  onMouseLeave={() => setHoveredPatch(undefined)}
+                />
               ) : (
                 <div>
                   <Pi />
@@ -673,6 +708,44 @@ export default function App() {
                 </div>
               )}
               <figcaption>PI PATCHWORK</figcaption>
+              {grid && hoveredPatch && (
+                <div className="patchTooltip" style={{ left: hoveredPatch.left, top: hoveredPatch.top }}>
+                  <div className="patchTooltipHead">
+                    <strong>PATCH #{hoveredPatch.info.index}</strong>
+                    <span>{hoveredPatch.info.mode.toUpperCase()} · {hoveredPatch.info.width}×{hoveredPatch.info.height}px · {hoveredPatch.info.totalBytes}B</span>
+                  </div>
+                  <dl>
+                    <dt>位置</dt>
+                    <dd>x {hoveredPatch.info.x}, y {hoveredPatch.info.y}</dd>
+                    {hoveredPatch.info.mode === "pi" && (
+                      <>
+                        <dt>π 桁</dt>
+                        <dd>
+                          小数点以下 {hoveredPatch.info.digitStart?.toLocaleString()}〜
+                          {(hoveredPatch.info.digitStart! + hoveredPatch.info.digitCount! - 1).toLocaleString()}
+                          {" "}({hoveredPatch.info.digitCount}桁)
+                        </dd>
+                        <dt>source</dt>
+                        <dd>{hoveredPatch.info.sourceSize}×{hoveredPatch.info.sourceSize} · offset {hoveredPatch.info.offset?.toLocaleString()}</dd>
+                        <dt>index</dt>
+                        <dd>bucket {hoveredPatch.info.bucket} · slot {hoveredPatch.info.slot}</dd>
+                        <dt>変換</dt>
+                        <dd>{transformLabel(hoveredPatch.info.transform!)} · repeat {1 << hoveredPatch.info.repeat!}× · phase {hoveredPatch.info.phase! & 1},{(hoveredPatch.info.phase! >> 1) & 1}</dd>
+                      </>
+                    )}
+                    <dt>bias RGB</dt>
+                    <dd>{triplet(hoveredPatch.info.bias)}</dd>
+                    <dt>{hoveredPatch.info.mode === "gradient" ? "gain X" : "gain RGB"}</dt>
+                    <dd>{triplet(hoveredPatch.info.gain)}</dd>
+                    {hoveredPatch.info.gradientY && (
+                      <>
+                        <dt>gain Y</dt>
+                        <dd>{triplet(hoveredPatch.info.gradientY)}</dd>
+                      </>
+                    )}
+                  </dl>
+                </div>
+              )}
             </figure>
           </div>
           {result && (
