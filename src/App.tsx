@@ -66,6 +66,23 @@ function updatePreviewRects(current: PatchRect[], progress: EncodeProgress) {
   }
   return next;
 }
+function updatePreviewDetails(current: PatchInfo[], progress: EncodeProgress) {
+  const patches = progress.preview ?? [];
+  if (!patches.length) return current;
+  const contains = (a: Pick<PatchInfo, "x" | "y" | "width" | "height">, b: Pick<PatchInfo, "x" | "y" | "width" | "height">) =>
+    b.x >= a.x &&
+    b.y >= a.y &&
+    b.x + b.width <= a.x + a.width &&
+    b.y + b.height <= a.y + a.height;
+  let next = [...current];
+  for (const patch of patches) {
+    const info: PatchInfo = { ...patch.info, index: 0 };
+    next = next.filter((existing) => !contains(existing, info) && !contains(info, existing));
+    next.push(info);
+  }
+  next.sort((a, b) => a.y - b.y || a.x - b.x || b.width * b.height - a.width * a.height);
+  return next.map((info, index) => ({ ...info, index: index + 1 }));
+}
 function draw(
   canvas: HTMLCanvasElement | null,
   image: ImageData,
@@ -100,6 +117,15 @@ function drawOutput(
   bytes?: Uint8Array,
 ) {
   draw(canvas, deblock ? deblockImage(raw, rects) : raw, grid, tile, bytes);
+  if (!canvas || !grid || bytes || !rects.length) return;
+  const c = canvas.getContext("2d")!,
+    maxSide = Math.max(...rects.map(([, , w, h]) => Math.max(w, h)));
+  for (const [x, y, w, h] of rects) {
+    const scale = Math.max(w, h) / Math.max(1, maxSide);
+    c.strokeStyle = `rgba(255,255,255,${scale >= 0.75 ? 0.42 : scale >= 0.4 ? 0.24 : 0.12})`;
+    c.lineWidth = 1;
+    c.strokeRect(x + 0.5, y + 0.5, w, h);
+  }
 }
 async function blobToImageData(file: Blob) {
   const bitmap = await createImageBitmap(file),
@@ -242,7 +268,9 @@ export default function App() {
     worker = useRef<Worker | undefined>(undefined),
     rawPreview = useRef<ImageData | undefined>(undefined),
     previewRects = useRef<PatchRect[]>([]),
+    previewDetails = useRef<PatchInfo[]>([]),
     deblockRef = useRef(true),
+    gridRef = useRef(true),
     sourceChosen = useRef(false);
   const parsedIndex = useMemo(() => index ? parsePiIndex(index) : undefined, [index]);
   const patchDetails = useMemo(() => result && parsedIndex ? patchInfos(result.bytes, parsedIndex) : [], [result, parsedIndex]);
@@ -288,6 +316,7 @@ export default function App() {
   }, [source]);
   useEffect(() => {
     deblockRef.current = deblock;
+    gridRef.current = grid;
     if (result) {
       drawOutput(
         output.current,
@@ -299,18 +328,19 @@ export default function App() {
         result.bytes,
       );
     } else if (busy && rawPreview.current) {
-      drawOutput(output.current, rawPreview.current, deblock, previewRects.current);
+      drawOutput(output.current, rawPreview.current, deblock, previewRects.current, grid);
     }
   }, [result, grid, deblock, busy]);
   function inspectPatchAt(canvas: HTMLCanvasElement, clientX: number, clientY: number) {
-    if (!grid || !result || !patchDetails.length) {
+    const details = result ? patchDetails : busy ? previewDetails.current : [];
+    if (!grid || !details.length) {
       setHoveredPatch(undefined);
       return;
     }
     const canvasRect = canvas.getBoundingClientRect(),
       x = ((clientX - canvasRect.left) * canvas.width) / canvasRect.width,
       y = ((clientY - canvasRect.top) * canvas.height) / canvasRect.height,
-      info = patchDetails.find((patch) => x >= patch.x && x < patch.x + patch.width && y >= patch.y && y < patch.y + patch.height);
+      info = details.find((patch) => x >= patch.x && x < patch.x + patch.width && y >= patch.y && y < patch.y + patch.height);
     if (!info) {
       setHoveredPatch(undefined);
       return;
@@ -336,6 +366,7 @@ export default function App() {
       setResult(undefined);
       rawPreview.current = undefined;
       previewRects.current = [];
+    previewDetails.current = [];
       setComparisons([]);
       setComparisonNote("");
     } catch {
@@ -346,6 +377,7 @@ export default function App() {
     if (!source || !digits || !index) return;
     rawPreview.current = blankPreview(source.width, source.height);
     previewRects.current = [];
+    previewDetails.current = [];
     setBusy(true);
     setEncodeProgress(undefined);
     setResult(undefined);
@@ -369,11 +401,14 @@ export default function App() {
         if (progress.preview?.length && rawPreview.current) {
           mergePreview(rawPreview.current, progress);
           previewRects.current = updatePreviewRects(previewRects.current, progress);
+          previewDetails.current = updatePreviewDetails(previewDetails.current, progress);
+          setHoveredPatch(undefined);
           drawOutput(
             output.current,
             rawPreview.current,
             deblockRef.current,
             previewRects.current,
+            gridRef.current,
           );
         }
         return;
@@ -435,6 +470,7 @@ export default function App() {
       setSource(undefined);
       rawPreview.current = undefined;
       previewRects.current = [];
+    previewDetails.current = [];
       setOriginalBytes(undefined);
       setComparisons([]);
       setComparisonNote("");
@@ -646,7 +682,7 @@ export default function App() {
                 />{" "}
                 境界補正
               </label>
-              {result && (
+              {(result || busy) && (
                 <label>
                   <input
                     type="checkbox"
@@ -688,7 +724,7 @@ export default function App() {
               {grid && hoveredPatch && (
                 <div className="patchTooltip" style={{ left: hoveredPatch.left, top: hoveredPatch.top }}>
                   <div className="patchTooltipHead">
-                    <strong>PATCH #{hoveredPatch.info.index}</strong>
+                    <strong>{busy && !result ? "LIVE " : ""}PATCH #{hoveredPatch.info.index}</strong>
                     <span>{hoveredPatch.info.mode.toUpperCase()} · {hoveredPatch.info.width}×{hoveredPatch.info.height}px · {hoveredPatch.info.totalBytes}B</span>
                   </div>
                   <dl>
