@@ -16,25 +16,32 @@ function filterSamples(
   const yp2=luma(data,p2),yp1=luma(data,p1),yp0=luma(data,p0),
     yq0=luma(data,q0),yq1=luma(data,q1),yq2=luma(data,q2),
     jump=Math.abs(yp0-yq0),
-    near=Math.max(Math.abs(yp1-yp0),Math.abs(yq1-yq0)),
-    far=Math.max(Math.abs(yp2-yp1),Math.abs(yq2-yq1));
+    left1=Math.abs(yp1-yp0),right1=Math.abs(yq1-yq0),
+    left2=Math.abs(yp2-yp1),right2=Math.abs(yq2-yq1),
+    local=(left1+right1)*.55+(left2+right2)*.2;
 
-  // Only treat moderate, isolated jumps as likely block seams.
-  // Very large jumps are much more likely to be real image edges.
-  if(jump<6||jump>72||near>28||far>24)return;
-  const artifact=jump-near*1.35-far*.35;
-  if(artifact<5)return;
-  const amount=clamp((artifact-5)/36,0,1)*strength,
-    limit=8+8*amount;
+  // Known patch boundaries let us be more permissive than a generic blur.
+  // Preserve very strong edges, but smooth a seam when the boundary jump
+  // is noticeably larger than the local texture activity on either side.
+  if(jump<4||jump>112)return;
+  const excess=jump-local*.82;
+  if(excess<3)return;
+
+  const edgeProtection=clamp((112-jump)/72,.18,1),
+    confidence=clamp((excess-3)/34,0,1),
+    amount=strength*(.28+.72*confidence)*edgeProtection,
+    limit=6+18*confidence;
 
   for(let ch=0;ch<3;ch++){
     const a=data[p0+ch],b=data[q0+ch],
-      delta=clamp(((b-a)*4+(data[p1+ch]-data[q1+ch]))/8,-limit,limit)*amount;
+      inward=(data[p1+ch]-data[q1+ch])*.18,
+      delta=clamp((b-a)*.42+inward,-limit,limit)*amount;
     data[p0+ch]=Math.round(a+delta);
     data[q0+ch]=Math.round(b-delta);
 
-    if(near<12&&jump<48){
-      const outer=delta*.22;
+    const quiet=Math.max(left1,right1)<34&&Math.max(left2,right2)<30;
+    if(quiet){
+      const outer=delta*.28;
       data[p1+ch]=Math.round(data[p1+ch]+outer);
       data[q1+ch]=Math.round(data[q1+ch]-outer);
     }
@@ -71,12 +78,16 @@ function filterHorizontal(image:ImageData,y:number,x0:number,x1:number,strength:
   }
 }
 
-export function deblockImage(source:ImageData,rects:PatchRect[],strength=.72){
+export function deblockImage(source:ImageData,rects:PatchRect[],strength=.9){
   const image=new ImageData(new Uint8ClampedArray(source.data),source.width,source.height);
-  // Right/bottom edges only: every internal seam is visited once, including T junctions.
-  for(const [x,y,w,h] of rects){
-    if(x+w<image.width)filterVertical(image,x+w,y,y+h,strength);
-    if(y+h<image.height)filterHorizontal(image,y+h,x,x+w,strength);
+  // Two weak passes are less conspicuous than one aggressive pass and also
+  // catch T-junctions after their neighboring seam has been softened.
+  for(let pass=0;pass<2;pass++){
+    const passStrength=strength*(pass===0?.72:.42);
+    for(const [x,y,w,h] of rects){
+      if(x+w<image.width)filterVertical(image,x+w,y,y+h,passStrength);
+      if(y+h<image.height)filterHorizontal(image,y+h,x,x+w,passStrength);
+    }
   }
   return image;
 }
