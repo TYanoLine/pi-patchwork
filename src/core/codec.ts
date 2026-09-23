@@ -152,11 +152,50 @@ function principalDescriptor(target:Float64Array){
   for(let i=0;i<16;i++)out[i]=(target[i]-mean[0])*axis[0]+(target[16+i]-mean[1])*axis[1]+(target[32+i]-mean[2])*axis[2];
   return out;
 }
-function descriptorScore(target:Float64Array,d:Uint8Array,c:Omit<Candidate,'score'>,tw:number,th:number){
-  let sx=0,sxx=0,score=0;const q=new Float64Array(16);for(let i=0;i<16;i++){const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4));q[i]=qAt(d,c.offset,x,y,c.transform,c.repeat,c.phase,c.sourceSize,tw,th);sx+=q[i];sxx+=q[i]*q[i];}const den=16*sxx-sx*sx;for(let ch=0;ch<3;ch++){let sy=0,sxy=0;for(let i=0;i<16;i++){sy+=target[ch*16+i];sxy+=q[i]*target[ch*16+i];}const g=den?(16*sxy-sx*sy)/den:0,b=(sy-g*sx)/16;for(let i=0;i<16;i++){const delta=target[ch*16+i]-(b+g*q[i]);score+=delta*delta;}}return score;
+const DCT4=Array.from({length:4},(_,u)=>Array.from({length:4},(_,x)=>Math.cos(Math.PI*(2*x+1)*u/8)));
+function frequencySignature(values:ArrayLike<number>){
+  const energy=[0,0,0,0,0,0];let total=0;
+  for(let v=0;v<4;v++)for(let u=0;u<4;u++){
+    if(u===0&&v===0)continue;
+    let c=0;
+    for(let y=0;y<4;y++)for(let x=0;x<4;x++)c+=values[y*4+x]*DCT4[u][x]*DCT4[v][y];
+    const e=c*c;total+=e;
+    const band=u+v<=2?0:u+v<=4?1:2;energy[band]+=e;
+    if(v===0)energy[3]+=e;else if(u===0)energy[4]+=e;else energy[5]+=e;
+  }
+  if(total<=1e-9)return new Float64Array(energy);
+  return Float64Array.from(energy,value=>value/total);
+}
+function frequencyDistance(a:ArrayLike<number>,b:ArrayLike<number>){
+  let total=0;for(let i=0;i<6;i++){const d=a[i]-b[i];total+=d*d;}return total;
+}
+function sampledLumaDescriptor(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number){
+  const out=new Float64Array(16);
+  for(let i=0;i<16;i++){
+    const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4)),
+      p=((y0+y)*width+x0+x)*4;
+    out[i]=data[p]*.299+data[p+1]*.587+data[p+2]*.114;
+  }
+  return out;
+}
+function reconstructedLumaDescriptor(r:Record,d:Uint8Array,tw:number,th:number){
+  const out=new Float64Array(16);
+  for(let i=0;i<16;i++){
+    const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4));
+    out[i]=pixel(r,d,x,y,tw,th,0)*.299+pixel(r,d,x,y,tw,th,1)*.587+pixel(r,d,x,y,tw,th,2)*.114;
+  }
+  return out;
+}
+function descriptorScore(target:Float64Array,targetFeature:Float64Array,targetFrequency:Float64Array,d:Uint8Array,c:Omit<Candidate,'score'>,tw:number,th:number){
+  let sx=0,sxx=0,score=0;const q=new Float64Array(16);
+  for(let i=0;i<16;i++){const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4));q[i]=qAt(d,c.offset,x,y,c.transform,c.repeat,c.phase,c.sourceSize,tw,th);sx+=q[i];sxx+=q[i]*q[i];}
+  const den=16*sxx-sx*sx;
+  for(let ch=0;ch<3;ch++){let sy=0,sxy=0;for(let i=0;i<16;i++){sy+=target[ch*16+i];sxy+=q[i]*target[ch*16+i];}const g=den?(16*sxy-sx*sy)/den:0,b=(sy-g*sx)/16;for(let i=0;i<16;i++){const delta=target[ch*16+i]-(b+g*q[i]);score+=delta*delta;}}
+  let featureEnergy=0;for(let i=0;i<16;i++)featureEnergy+=targetFeature[i]*targetFeature[i];
+  return score+frequencyDistance(targetFrequency,frequencySignature(q))*Math.max(256,featureEnergy)*5.5;
 }
 function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,piComposition:number){
-  const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),scored:Candidate[]=[],
+  const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),targetFrequency=frequencySignature(feature),scored:Candidate[]=[],
     piPreference=Math.max(0,Math.min(100,piComposition))/100,
     dictionary=objective==='dictionary';
   const transforms=quality===0?[0,2]:quality===1?[0,1,2,3]:[0,1,2,3,4,5,6,7],
@@ -187,7 +226,7 @@ function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:nu
       if(refs.size>=refTarget)break;
     }
     for(const [offset,ref] of refs)for(let repeat=0;repeat<repeatCount;repeat++)for(let transform=0;transform<8;transform++)for(let phase=0;phase<phaseCount;phase++){
-      const base={offset,sourceCode,bucket:ref.bucket,slot:ref.slot,repeat,transform,phase,sourceSize},score=descriptorScore(target,d,base,tw,th);
+      const base={offset,sourceCode,bucket:ref.bucket,slot:ref.slot,repeat,transform,phase,sourceSize},score=descriptorScore(target,feature,targetFrequency,d,base,tw,th);
       scored.push({...base,score});
     }
   }
@@ -216,7 +255,7 @@ function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,
   }
   return model;
 }
-type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; meanError:number; peakBlockError:number; hotRatio:number; children?:Region[]; tried?:boolean };
+type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; meanError:number; peakBlockError:number; hotRatio:number; frequencyMismatch:number; children?:Region[]; tried?:boolean };
 function localErrorProfile(r:Record,data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,digits:Uint8Array){
   const block=4;let total=0,peakBlockError=0;
   for(let by=0;by<th;by+=block)for(let bx=0;bx<tw;bx+=block){
@@ -297,8 +336,12 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
   const make=(x:number,y:number,w:number,h:number):Region=>{
     const record=best(source.data,source.width,x,y,w,h,digits,index,quality,objective,compressionPriority,piComposition),
       error=reconstructionError(record,source.data,source.width,x,y,w,h,digits),
-      profile=localErrorProfile(record,source.data,source.width,x,y,w,h,digits);
-    return{x,y,w,h,record,error,meanError:profile.meanError,peakBlockError:profile.peakBlockError,hotRatio:profile.hotRatio};
+      profile=localErrorProfile(record,source.data,source.width,x,y,w,h,digits),
+      frequencyMismatch=frequencyDistance(
+        frequencySignature(sampledLumaDescriptor(source.data,source.width,x,y,w,h)),
+        frequencySignature(reconstructedLumaDescriptor(record,digits,w,h)),
+      );
+    return{x,y,w,h,record,error,meanError:profile.meanError,peakBlockError:profile.peakBlockError,hotRatio:profile.hotRatio,frequencyMismatch};
   };
   const roots:Region[]=[],leaves:Region[]=[];let rootDone=0,rootBytes=0;
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){
@@ -313,7 +356,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     for(const node of leaves)if(!node.tried&&canSplit(node,minPatchSize)){
       const area=node.w*node.h,errorDensity=node.error/(area*3),
         hotspotBoost=objective==='dictionary'&&piPreference>=.8&&isPiRecord(node.record)
-          ?Math.min(3.5,Math.max(0,node.hotRatio-1.8)*.45+Math.max(0,node.peakBlockError-1200)/1800+Math.max(0,node.meanError-500)/1200)
+          ?Math.min(4,Math.max(0,node.hotRatio-1.8)*.45+Math.max(0,node.peakBlockError-1200)/1800+Math.max(0,node.meanError-500)/1200+Math.max(0,node.frequencyMismatch-.12)*2.5)
           :0,
         score=errorDensity*Math.pow(area,areaPower)*(1+hotspotBoost);
       if(score>selectionPriority){selected=node;selectionPriority=score;}
@@ -340,9 +383,11 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
       childMean=children.reduce((sum,node)=>sum+node.meanError*node.w*node.h,0)/(selected.w*selected.h),
       directPeakImprovement=(selected.peakBlockError-childPeak)/Math.max(1,selected.peakBlockError),
       directMeanImprovement=(selected.meanError-childMean)/Math.max(1,selected.meanError),
-      broadFailure=piPreference>=.95&&isPiRecord(selected.record)&&selected.meanError>625,
+      childFrequency=children.reduce((sum,node)=>sum+node.frequencyMismatch*node.w*node.h,0)/(selected.w*selected.h),
+      directFrequencyImprovement=(selected.frequencyMismatch-childFrequency)/Math.max(.01,selected.frequencyMismatch),
+      broadFailure=piPreference>=.95&&isPiRecord(selected.record)&&(selected.meanError>625||selected.frequencyMismatch>.18),
       directHotspotRescue=hotspot&&directPeakImprovement>.28,
-      directBroadRescue=broadFailure&&directMeanImprovement>.2,
+      directBroadRescue=broadFailure&&(directMeanImprovement>.2||directFrequencyImprovement>.25),
       directRescue=directHotspotRescue||directBroadRescue;
     let bestPlan:{children:Region[];leaves:Region[];extraBytes:number;reduction:number;efficiency:number;splitChild?:Region;grandchildren?:Region[]}|undefined;
     const directQualityOk=directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample&&directScore>=minEfficiency,
@@ -374,8 +419,10 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
           planMean=planLeaves.reduce((sum,node)=>sum+node.meanError*node.w*node.h,0)/(selected.w*selected.h),
           planPeakImprovement=(selected.peakBlockError-planPeak)/Math.max(1,selected.peakBlockError),
           planMeanImprovement=(selected.meanError-planMean)/Math.max(1,selected.meanError),
+          planFrequency=planLeaves.reduce((sum,node)=>sum+node.frequencyMismatch*node.w*node.h,0)/(selected.w*selected.h),
+          planFrequencyImprovement=(selected.frequencyMismatch-planFrequency)/Math.max(.01,selected.frequencyMismatch),
           hotspotRescue=hotspot&&planPeakImprovement>.22,
-          broadRescue=broadFailure&&planMeanImprovement>.16,
+          broadRescue=broadFailure&&(planMeanImprovement>.16||planFrequencyImprovement>.2),
           rescue=hotspotRescue||broadRescue,
           qualityOk=reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&efficiency>=minEfficiency*.85,
           piOk=coverageDriven&&(piPreference>=.999||efficiency>=minEfficiency*.3),
