@@ -497,3 +497,20 @@ footer {
   color: #747c74;
   font: 9px/1.6 monospace;
 }
+
+.previewToggles {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  letter-spacing: 0;
+}
+.previewToggles label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.previewToggles input {
+  accent-color: #b7d94a;
+}
