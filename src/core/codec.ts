@@ -187,7 +187,16 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
   while(HEADER_BYTES+cols*rows*13>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
   const rootTotal=cols*rows,initialSize=HEADER_BYTES+rootTotal*13;
   const emit=(event:Omit<EncodeProgress,'elapsedMs'>)=>hooks?.onProgress?.({...event,elapsedMs:performance.now()-started});
-  const previewFor=(regions:Region[])=>hooks?.shouldPreview?.()?regions.map(region=>renderRegion(region,digits)):undefined;
+  const pendingPreview:Region[]=[];
+  const previewFor=(regions:Region[],force=false)=>{
+    if(!hooks?.onProgress)return undefined;
+    pendingPreview.push(...regions);
+    if(!force&&!hooks.shouldPreview?.())return undefined;
+    if(!pendingPreview.length)return undefined;
+    const preview=pendingPreview.map(region=>renderRegion(region,digits));
+    pendingPreview.length=0;
+    return preview;
+  };
   const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
   const roots:Region[]=[],leaves:Region[]=[];let rootDone=0;
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){
@@ -242,7 +251,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     const refineTotal=Math.max(1,budget-initialSize),used=Math.max(0,size-initialSize);
     emit({phase:'refine',overall:.28+.67*Math.min(1,used/refineTotal),done:used,total:refineTotal,attempts,patches:leaves.length,bytes:size,budget,preview:previewFor(bestPlan.leaves)});
   }
-  emit({phase:'final',overall:.97,done:size,total:budget,attempts,patches:leaves.length,bytes:size,budget});
+  emit({phase:'final',overall:.97,done:size,total:budget,attempts,patches:leaves.length,bytes:size,budget,preview:previewFor([],true)});
   const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,DICTIONARY_ID);
   let cursor=HEADER_BYTES;
   const write=(node:Region)=>{
