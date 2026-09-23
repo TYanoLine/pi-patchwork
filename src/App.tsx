@@ -225,7 +225,7 @@ export default function App() {
   const original = useRef<HTMLCanvasElement>(null),
     output = useRef<HTMLCanvasElement>(null),
     worker = useRef<Worker | undefined>(undefined),
-    rawPreview = useRef<ImageData>(),
+    rawPreview = useRef<ImageData | undefined>(undefined),
     previewRects = useRef<PatchRect[]>([]),
     deblockRef = useRef(true);
   const patchSizes = result ? patchRects(result.bytes).map(([, , w, h]) => Math.max(w, h)) : [];
