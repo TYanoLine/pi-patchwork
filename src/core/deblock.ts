@@ -18,32 +18,28 @@ function filterSamples(
     jump=Math.abs(yp0-yq0),
     left1=Math.abs(yp1-yp0),right1=Math.abs(yq1-yq0),
     left2=Math.abs(yp2-yp1),right2=Math.abs(yq2-yq1),
-    local=(left1+right1)*.55+(left2+right2)*.2;
+    local=(left1+right1)*.5+(left2+right2)*.18;
 
-  // Known patch boundaries let us be more permissive than a generic blur.
-  // Preserve very strong edges, but smooth a seam when the boundary jump
-  // is noticeably larger than the local texture activity on either side.
-  if(jump<4||jump>112)return;
-  const excess=jump-local*.82;
-  if(excess<3)return;
+  if(jump<4||jump>116)return;
+  const excess=jump-local*.78;
+  if(excess<2.5)return;
 
-  const edgeProtection=clamp((112-jump)/72,.18,1),
-    confidence=clamp((excess-3)/34,0,1),
-    amount=strength*(.28+.72*confidence)*edgeProtection,
-    limit=6+18*confidence;
+  const confidence=clamp((excess-2.5)/30,0,1),
+    edgeProtection=clamp((116-jump)/74,.2,1),
+    amount=strength*(.32+.68*confidence)*edgeProtection,
+    limit=7+20*confidence,
+    weights=[.18,.46,.82];
 
   for(let ch=0;ch<3;ch++){
     const a=data[p0+ch],b=data[q0+ch],
-      inward=(data[p1+ch]-data[q1+ch])*.18,
-      delta=clamp((b-a)*.42+inward,-limit,limit)*amount;
-    data[p0+ch]=Math.round(a+delta);
-    data[q0+ch]=Math.round(b-delta);
+      inward=(data[p1+ch]-data[q1+ch])*.12,
+      correction=clamp((b-a)*.48+inward,-limit,limit)*amount;
 
-    const quiet=Math.max(left1,right1)<34&&Math.max(left2,right2)<30;
-    if(quiet){
-      const outer=delta*.28;
-      data[p1+ch]=Math.round(data[p1+ch]+outer);
-      data[q1+ch]=Math.round(data[q1+ch]-outer);
+    const ps=[p2,p1,p0],qs=[q2,q1,q0];
+    for(let i=0;i<3;i++){
+      const delta=correction*weights[i];
+      data[ps[i]+ch]=Math.round(data[ps[i]+ch]+delta);
+      data[qs[i]+ch]=Math.round(data[qs[i]+ch]-delta);
     }
   }
 }
@@ -78,12 +74,12 @@ function filterHorizontal(image:ImageData,y:number,x0:number,x1:number,strength:
   }
 }
 
-export function deblockImage(source:ImageData,rects:PatchRect[],strength=.9){
+export function deblockImage(source:ImageData,rects:PatchRect[],strength=1){
   const image=new ImageData(new Uint8ClampedArray(source.data),source.width,source.height);
-  // Two weak passes are less conspicuous than one aggressive pass and also
-  // catch T-junctions after their neighboring seam has been softened.
+  // Feather a few pixels across known codec seams. Two moderate passes remove
+  // low-frequency block steps without turning the whole image into a blur.
   for(let pass=0;pass<2;pass++){
-    const passStrength=strength*(pass===0?.72:.42);
+    const passStrength=strength*(pass===0?.88:.48);
     for(const [x,y,w,h] of rects){
       if(x+w<image.width)filterVertical(image,x+w,y,y+h,passStrength);
       if(y+h<image.height)filterHorizontal(image,y+h,x,x+w,passStrength);
