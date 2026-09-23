@@ -474,9 +474,11 @@ export default function App() {
       <section className="workbench">
         <aside>
           <label className="drop">
-            <ImagePlus />
-            <strong>画像を選択</strong>
-            <small>PNG / JPEG / WebP · 最大辺512px</small>
+            <span className="dropMain">
+              <ImagePlus />
+              <strong>画像を選択</strong>
+            </span>
+            <small>PNG / JPEG / WebP</small>
             <input
               type="file"
               accept="image/*"
