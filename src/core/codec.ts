@@ -160,50 +160,69 @@ function principalDescriptor(target:Float64Array){
   for(let i=0;i<16;i++)out[i]=(target[i]-mean[0])*axis[0]+(target[16+i]-mean[1])*axis[1]+(target[32+i]-mean[2])*axis[2];
   return out;
 }
-const DCT4=Array.from({length:4},(_,u)=>Array.from({length:4},(_,x)=>Math.cos(Math.PI*(2*x+1)*u/8)));
-function frequencySignature(values:ArrayLike<number>){
-  const energy=[0,0,0,0,0,0];let total=0;
-  for(let v=0;v<4;v++)for(let u=0;u<4;u++){
-    if(u===0&&v===0)continue;
-    let c=0;
-    for(let y=0;y<4;y++)for(let x=0;x<4;x++)c+=values[y*4+x]*DCT4[u][x]*DCT4[v][y];
-    const e=c*c;total+=e;
-    const band=u+v<=2?0:u+v<=4?1:2;energy[band]+=e;
-    if(v===0)energy[3]+=e;else if(u===0)energy[4]+=e;else energy[5]+=e;
+function frequencySignature8(values:ArrayLike<number>){
+  let mean=0;for(let i=0;i<64;i++)mean+=values[i];mean/=64;
+  const block2=new Float64Array(16),block4=new Float64Array(4);
+  for(let by=0;by<4;by++)for(let bx=0;bx<4;bx++){
+    let sum=0;for(let y=0;y<2;y++)for(let x=0;x<2;x++)sum+=values[(by*2+y)*8+bx*2+x];
+    block2[by*4+bx]=sum/4;
   }
-  if(total<=1e-9)return new Float64Array(energy);
-  return Float64Array.from(energy,value=>value/total);
+  for(let by=0;by<2;by++)for(let bx=0;bx<2;bx++){
+    let sum=0;for(let y=0;y<2;y++)for(let x=0;x<2;x++)sum+=block2[(by*2+y)*4+bx*2+x];
+    block4[by*2+bx]=sum/4;
+  }
+  let low=0,mid=0,high=0,gx=0,gy=0,gd=0;
+  for(let i=0;i<4;i++){const d=block4[i]-mean;low+=d*d*16;}
+  for(let by=0;by<4;by++)for(let bx=0;bx<4;bx++){
+    const parent=block4[Math.floor(by/2)*2+Math.floor(bx/2)],d=block2[by*4+bx]-parent;mid+=d*d*4;
+    for(let y=0;y<2;y++)for(let x=0;x<2;x++){const q=values[(by*2+y)*8+bx*2+x]-block2[by*4+bx];high+=q*q;}
+  }
+  for(let y=0;y<8;y++)for(let x=0;x<8;x++){
+    const here=values[y*8+x];
+    if(x+1<8){const d=here-values[y*8+x+1];gx+=d*d;}
+    if(y+1<8){const d=here-values[(y+1)*8+x];gy+=d*d;}
+    if(x+1<8&&y+1<8){const d=here-values[(y+1)*8+x+1];gd+=d*d;}
+  }
+  const bands=low+mid+high||1,dirs=gx+gy+gd||1;
+  return Float64Array.from([low/bands,mid/bands,high/bands,gx/dirs,gy/dirs,gd/dirs]);
 }
 function frequencyDistance(a:ArrayLike<number>,b:ArrayLike<number>){
   let total=0;for(let i=0;i<6;i++){const d=a[i]-b[i];total+=d*d;}return total;
 }
-function sampledLumaDescriptor(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number){
-  const out=new Float64Array(16);
-  for(let i=0;i<16;i++){
-    const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4)),
+function sampledLumaGrid(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number){
+  const out=new Float64Array(64);
+  for(let i=0;i<64;i++){
+    const x=Math.min(tw-1,Math.floor((i%8+.5)*tw/8)),y=Math.min(th-1,Math.floor((Math.floor(i/8)+.5)*th/8)),
       p=((y0+y)*width+x0+x)*4;
     out[i]=data[p]*.299+data[p+1]*.587+data[p+2]*.114;
   }
   return out;
 }
-function reconstructedLumaDescriptor(r:Record,d:Uint8Array,tw:number,th:number){
-  const out=new Float64Array(16);
-  for(let i=0;i<16;i++){
-    const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4));
+function reconstructedLumaGrid(r:Record,d:Uint8Array,tw:number,th:number){
+  const out=new Float64Array(64);
+  for(let i=0;i<64;i++){
+    const x=Math.min(tw-1,Math.floor((i%8+.5)*tw/8)),y=Math.min(th-1,Math.floor((Math.floor(i/8)+.5)*th/8));
     out[i]=pixel(r,d,x,y,tw,th,0)*.299+pixel(r,d,x,y,tw,th,1)*.587+pixel(r,d,x,y,tw,th,2)*.114;
   }
   return out;
 }
-function descriptorScore(target:Float64Array,targetFeature:Float64Array,targetFrequency:Float64Array,d:Uint8Array,c:Omit<Candidate,'score'>,tw:number,th:number){
+function candidateFrequencyGrid(d:Uint8Array,c:Omit<Candidate,'score'>,tw:number,th:number){
+  const out=new Float64Array(64);
+  for(let i=0;i<64;i++){
+    const x=Math.min(tw-1,Math.floor((i%8+.5)*tw/8)),y=Math.min(th-1,Math.floor((Math.floor(i/8)+.5)*th/8));
+    out[i]=qAt(d,c.offset,x,y,c.transform,c.repeat,c.phase,c.sourceSize,tw,th);
+  }
+  return out;
+}
+function descriptorScore(target:Float64Array,d:Uint8Array,c:Omit<Candidate,'score'>,tw:number,th:number){
   let sx=0,sxx=0,score=0;const q=new Float64Array(16);
   for(let i=0;i<16;i++){const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4));q[i]=qAt(d,c.offset,x,y,c.transform,c.repeat,c.phase,c.sourceSize,tw,th);sx+=q[i];sxx+=q[i]*q[i];}
   const den=16*sxx-sx*sx;
   for(let ch=0;ch<3;ch++){let sy=0,sxy=0;for(let i=0;i<16;i++){sy+=target[ch*16+i];sxy+=q[i]*target[ch*16+i];}const g=den?(16*sxy-sx*sy)/den:0,b=(sy-g*sx)/16;for(let i=0;i<16;i++){const delta=target[ch*16+i]-(b+g*q[i]);score+=delta*delta;}}
-  let featureEnergy=0;for(let i=0;i<16;i++)featureEnergy+=targetFeature[i]*targetFeature[i];
-  return score+frequencyDistance(targetFrequency,frequencySignature(q))*Math.max(256,featureEnergy)*5.5;
+  return score;
 }
 function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,piComposition:number){
-  const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),targetFrequency=frequencySignature(feature),scored:Candidate[]=[],
+  const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),scored:Candidate[]=[],
     piPreference=Math.max(0,Math.min(100,piComposition))/100,
     dictionary=objective==='dictionary';
   const transforms=quality===0?[0,2]:quality===1?[0,1,2,3]:[0,1,2,3,4,5,6,7],
@@ -234,12 +253,19 @@ function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:nu
       if(refs.size>=refTarget)break;
     }
     for(const [offset,ref] of refs)for(let repeat=0;repeat<repeatCount;repeat++)for(let transform=0;transform<8;transform++)for(let phase=0;phase<phaseCount;phase++){
-      const base={offset,sourceCode,bucket:ref.bucket,slot:ref.slot,repeat,transform,phase,sourceSize},score=descriptorScore(target,feature,targetFrequency,d,base,tw,th);
+      const base={offset,sourceCode,bucket:ref.bucket,slot:ref.slot,repeat,transform,phase,sourceSize},score=descriptorScore(target,d,base,tw,th);
       scored.push({...base,score});
     }
   }
   scored.sort((a,b)=>a.score-b.score);
-  return scored.slice(0,keep);
+  const pool=scored.slice(0,Math.min(scored.length,Math.max(keep*2,192))),
+    targetFrequency=frequencySignature8(sampledLumaGrid(data,width,x0,y0,tw,th));
+  for(const candidate of pool){
+    const frequencyPenalty=frequencyDistance(targetFrequency,frequencySignature8(candidateFrequencyGrid(d,candidate,tw,th)));
+    candidate.score*=1+frequencyPenalty*2.4;
+  }
+  pool.sort((a,b)=>a.score-b.score);
+  return pool.slice(0,keep);
 }
 function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,compressionPriority:number,piComposition:number){
   let model=solid(data,width,x0,y0,tw,th),modelError=reconstructionError(model,data,width,x0,y0,tw,th,d),
@@ -346,8 +372,8 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
       error=reconstructionError(record,source.data,source.width,x,y,w,h,digits),
       profile=localErrorProfile(record,source.data,source.width,x,y,w,h,digits),
       frequencyMismatch=frequencyDistance(
-        frequencySignature(sampledLumaDescriptor(source.data,source.width,x,y,w,h)),
-        frequencySignature(reconstructedLumaDescriptor(record,digits,w,h)),
+        frequencySignature8(sampledLumaGrid(source.data,source.width,x,y,w,h)),
+        frequencySignature8(reconstructedLumaGrid(record,digits,w,h)),
       );
     return{x,y,w,h,record,error,meanError:profile.meanError,peakBlockError:profile.peakBlockError,hotRatio:profile.hotRatio,frequencyMismatch};
   };
