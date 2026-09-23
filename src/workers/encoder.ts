@@ -2,7 +2,7 @@
 import { encode, parseDigits, type EncodeObjective, type EncodeProgress } from '../core/codec';
 import { parsePiIndex } from '../core/piIndex';
 
-self.onmessage = (event: MessageEvent<{image: ImageData; digits: string; index: ArrayBuffer; savePercent: number; quality: number; splitPersistence: number; minPatchSize: number; objective: EncodeObjective; compressionPriority: number; piComposition: number}>) => {
+self.onmessage = (event: MessageEvent<{image: ImageData; digits: string; index: ArrayBuffer; savePercent: number; quality: number; splitPersistence: number; minPatchSize: number; objective: EncodeObjective; compressionPriority: number; piComposition: number; purePi: boolean}>) => {
   try {
     const digits = parseDigits(event.data.digits);
     const index = parsePiIndex(event.data.index);
@@ -30,6 +30,7 @@ self.onmessage = (event: MessageEvent<{image: ImageData; digits: string; index: 
         onProgress,
         shouldPreview: () => performance.now() - lastPreviewAt >= 140,
       },
+      event.data.purePi,
     );
     self.postMessage({type: 'result', result}, [result.bytes.buffer, result.image.data.buffer]);
   } catch (error) {
