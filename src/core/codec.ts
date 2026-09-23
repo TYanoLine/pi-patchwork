@@ -28,16 +28,21 @@ function qAt(d:Uint8Array,off:number,x:number,y:number,t:number,rep:number,phase
   return (a*(1-fx)+b*fx)*(1-fy)+(c*(1-fx)+e*fx)*fy;
 }
 function clamp(v:number){return Math.max(0,Math.min(255,Math.round(v)));}
+function fitWeight(x:number,y:number,w:number,h:number){
+  const edge=x===0||y===0||x===w-1||y===h-1;
+  const near=x===1||y===1||x===w-2||y===h-2;
+  return edge?1.8:near?1.2:1;
+}
 function gradient(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number):Record {
-  const n=tw*th,bias:[number,number,number]=[0,0,0],gx:[number,number,number]=[0,0,0],gy:[number,number,number]=[0,0,0];
-  let xx=0,yy=0;
+  const bias:[number,number,number]=[0,0,0],gx:[number,number,number]=[0,0,0],gy:[number,number,number]=[0,0,0];
+  let sw=0,xx=0,yy=0;
   for(let y=0;y<th;y++)for(let x=0;x<tw;x++){
-    const u=tw>1?(2*x-tw+1)/(tw-1):0,v=th>1?(2*y-th+1)/(th-1):0,p=((y0+y)*width+x0+x)*4;
-    xx+=u*u;yy+=v*v;
-    for(let ch=0;ch<3;ch++){bias[ch]+=data[p+ch];gx[ch]+=u*data[p+ch];gy[ch]+=v*data[p+ch];}
+    const weight=fitWeight(x,y,tw,th),u=tw>1?(2*x-tw+1)/(tw-1):0,v=th>1?(2*y-th+1)/(th-1):0,p=((y0+y)*width+x0+x)*4;
+    sw+=weight;xx+=weight*u*u;yy+=weight*v*v;
+    for(let ch=0;ch<3;ch++){bias[ch]+=weight*data[p+ch];gx[ch]+=weight*u*data[p+ch];gy[ch]+=weight*v*data[p+ch];}
   }
   for(let ch=0;ch<3;ch++){
-    bias[ch]=clamp(bias[ch]/n);
+    bias[ch]=clamp(bias[ch]/sw);
     gx[ch]=Math.max(-127,Math.min(127,Math.round(gx[ch]/(xx||1))));
     gy[ch]=Math.max(-127,Math.min(127,Math.round(gy[ch]/(yy||1))));
   }
@@ -50,10 +55,14 @@ function pixel(r:Record,d:Uint8Array,x:number,y:number,tw:number,th:number,ch:nu
 }
 function rSlopeY(r:Record,ch:number){return ((r.offset>>(ch*8))&255)<<24>>24;}
 function fit(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,c:Candidate):Record {
-  const n=tw*th;let sq=0,sq2=0;const sy=[0,0,0],sqy=[0,0,0];
-  for(let y=0;y<th;y++)for(let x=0;x<tw;x++){const q=qAt(d,c.offset,x,y,c.transform,c.repeat,c.phase,c.sourceSize,tw,th);sq+=q;sq2+=q*q;const p=((y0+y)*width+x0+x)*4;for(let ch=0;ch<3;ch++){sy[ch]+=data[p+ch];sqy[ch]+=q*data[p+ch];}}
-  const gain:[number,number,number]=[0,0,0],bias:[number,number,number]=[0,0,0],den=n*sq2-sq*sq;
-  for(let ch=0;ch<3;ch++){const g=den?Math.round((n*sqy[ch]-sq*sy[ch])/den):0;gain[ch]=Math.max(-127,Math.min(127,g));bias[ch]=clamp((sy[ch]-gain[ch]*sq)/n);}
+  let sw=0,sq=0,sq2=0;const sy=[0,0,0],sqy=[0,0,0];
+  for(let y=0;y<th;y++)for(let x=0;x<tw;x++){
+    const weight=fitWeight(x,y,tw,th),q=qAt(d,c.offset,x,y,c.transform,c.repeat,c.phase,c.sourceSize,tw,th),p=((y0+y)*width+x0+x)*4;
+    sw+=weight;sq+=weight*q;sq2+=weight*q*q;
+    for(let ch=0;ch<3;ch++){sy[ch]+=weight*data[p+ch];sqy[ch]+=weight*q*data[p+ch];}
+  }
+  const gain:[number,number,number]=[0,0,0],bias:[number,number,number]=[0,0,0],den=sw*sq2-sq*sq;
+  for(let ch=0;ch<3;ch++){const g=den?Math.round((sw*sqy[ch]-sq*sy[ch])/den):0;gain[ch]=Math.max(-127,Math.min(127,g));bias[ch]=clamp((sy[ch]-gain[ch]*sq)/sw);}
   return{offset:c.offset,bias,gain,transform:c.transform,repeat:c.repeat,phase:c.phase,sourceSize:c.sourceSize,solid:false};
 }
 function reconstructionError(r:Record,data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array){
@@ -69,7 +78,10 @@ function reconstructionError(r:Record,data:Uint8ClampedArray,width:number,x0:num
   return total;
 }
 function solid(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number):Record {
-  const bias:[number,number,number]=[0,0,0],n=tw*th;for(let y=0;y<th;y++)for(let x=0;x<tw;x++){const p=((y0+y)*width+x0+x)*4;for(let ch=0;ch<3;ch++)bias[ch]+=data[p+ch];}for(let ch=0;ch<3;ch++)bias[ch]=clamp(bias[ch]/n);return{offset:0,bias,gain:[0,0,0],transform:0,repeat:0,phase:0,sourceSize:4,solid:true};
+  const bias:[number,number,number]=[0,0,0];let sw=0;
+  for(let y=0;y<th;y++)for(let x=0;x<tw;x++){const weight=fitWeight(x,y,tw,th),p=((y0+y)*width+x0+x)*4;sw+=weight;for(let ch=0;ch<3;ch++)bias[ch]+=weight*data[p+ch];}
+  for(let ch=0;ch<3;ch++)bias[ch]=clamp(bias[ch]/sw);
+  return{offset:0,bias,gain:[0,0,0],transform:0,repeat:0,phase:0,sourceSize:4,solid:true};
 }
 function colorDescriptor(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number){
   const sums=new Float64Array(48),counts=new Uint16Array(16);for(let y=0;y<th;y++)for(let x=0;x<tw;x++){const cell=Math.min(3,Math.floor(y*4/th))*4+Math.min(3,Math.floor(x*4/tw)),p=((y0+y)*width+x0+x)*4;for(let ch=0;ch<3;ch++)sums[ch*16+cell]+=data[p+ch];counts[cell]++;}for(let ch=0;ch<3;ch++)for(let i=0;i<16;i++)sums[ch*16+i]/=Math.max(1,counts[i]);return sums;
@@ -123,14 +135,27 @@ function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,
 }
 type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; children?:Region[]; tried?:boolean };
 function partition(x:number,y:number,w:number,h:number){const a=Math.floor(w/2),b=Math.floor(h/2);return[[x,y,a,b],[x+a,y,w-a,b],[x,y+b,a,h-b],[x+a,y+b,w-a,h-b]] as const;}
+function pairSeamMismatch(a:Region,b:Region,data:Uint8ClampedArray,width:number,digits:Uint8Array){
+  let total=0,count=0;
+  if(a.x+a.w===b.x||b.x+b.w===a.x){
+    const left=a.x<b.x?a:b,right=left===a?b:a,y0=Math.max(left.y,right.y),y1=Math.min(left.y+left.h,right.y+right.h);
+    for(let py=y0;py<y1;py++){const ly=py-left.y,ry=py-right.y,lp=(py*width+left.x+left.w-1)*4,rp=(py*width+right.x)*4;for(let ch=0;ch<3;ch++){const reconstructed=pixel(left.record,digits,left.w-1,ly,left.w,left.h,ch)-pixel(right.record,digits,0,ry,right.w,right.h,ch),source=data[lp+ch]-data[rp+ch],delta=reconstructed-source;total+=delta*delta;count++;}}
+  } else if(a.y+a.h===b.y||b.y+b.h===a.y){
+    const top=a.y<b.y?a:b,bottom=top===a?b:a,x0=Math.max(top.x,bottom.x),x1=Math.min(top.x+top.w,bottom.x+bottom.w);
+    for(let px=x0;px<x1;px++){const tx=px-top.x,bx=px-bottom.x,tp=((top.y+top.h-1)*width+px)*4,bp=(bottom.y*width+px)*4;for(let ch=0;ch<3;ch++){const reconstructed=pixel(top.record,digits,tx,top.h-1,top.w,top.h,ch)-pixel(bottom.record,digits,bx,0,bottom.w,bottom.h,ch),source=data[tp+ch]-data[bp+ch],delta=reconstructed-source;total+=delta*delta;count++;}}
+  }
+  return count?total*2.2:0;
+}
+function seamPenalty(leaves:Region[],data:Uint8ClampedArray,width:number,digits:Uint8Array){
+  let total=0;for(let i=0;i<leaves.length;i++)for(let j=i+1;j<leaves.length;j++)total+=pairSeamMismatch(leaves[i],leaves[j],data,width,digits);return total;
+}
 export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50):EncodeResult {
   if(!digits.length||digits.length>0xffffffff||index.digitCount!==digits.length||source.width>65535||source.height>65535)throw new Error('画像・円周率辞書・特徴インデックスが一致しません');
   const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+13,Math.floor(raw*savePercent/100));
   const persistence=Math.max(0,Math.min(100,splitPersistence))/100,
-    minRelativeGain=.10-.085*persistence,
-    minGainPerSample=3-2.6*persistence,
-    poorFitThreshold=220-150*persistence,
-    bridgeGainPerSample=.8-.65*persistence;
+    lookaheadChildren=splitPersistence<=0?0:Math.max(1,Math.min(4,Math.ceil(persistence*4))),
+    minRelativeGain=.045,
+    minGainPerSample=.75;
   let tile=Math.max(16,Math.min(64,Math.ceil(Math.max(source.width,source.height)/8))),cols=Math.ceil(source.width/tile),rows=Math.ceil(source.height/tile);
   while(HEADER_BYTES+cols*rows*13>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
   const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
@@ -148,18 +173,37 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     if(!selected)break;
     selected.tried=true;
     const children=partition(selected.x,selected.y,selected.w,selected.h).map(([x,y,w,h])=>make(x,y,w,h)),
-      childError=children.reduce((sum,node)=>sum+node.error,0),
-      reduction=selected.error-childError,
+      directCost=children.reduce((sum,node)=>sum+node.error,0)+seamPenalty(children,source.data,source.width,digits),
+      directReduction=selected.error-directCost,
       samples=selected.w*selected.h*3,
-      relativeGain=selected.error?reduction/selected.error:0,
-      gainPerSample=reduction/samples,
-      fitError=selected.error/samples,
-      normalSplit=relativeGain>=minRelativeGain&&gainPerSample>=minGainPerSample,
-      bridgeSplit=fitError>=poorFitThreshold&&reduction>0&&gainPerSample>=bridgeGainPerSample;
-    // Persistence allows a weak first split when the parent itself is visibly poor,
-    // so deeper descendants can spend the byte budget where detail actually lives.
-    if(!normalSplit&&!bridgeSplit)continue;
-    selected.children=children;leaves.splice(leaves.indexOf(selected),1,...children);size+=40;
+      directRelative=selected.error?directReduction/selected.error:0,
+      directGain=directReduction/samples,
+      directEff=directReduction/40;
+    let bestPlan:{children:Region[];leaves:Region[];extraBytes:number;reduction:number;efficiency:number}|undefined;
+    if(directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample)bestPlan={children,leaves:children,extraBytes:40,reduction:directReduction,efficiency:directEff};
+
+    // Speculative lookahead: temporarily split the hardest children. Nothing is committed
+    // until the two-level plan beats the parent after seam cost and byte cost are included.
+    if(lookaheadChildren&&size+80<=budget){
+      const probe=children.filter(node=>node.w>=8&&node.h>=8).sort((a,b)=>b.error-a.error).slice(0,lookaheadChildren);
+      for(const child of probe){
+        const grandchildren=partition(child.x,child.y,child.w,child.h).map(([x,y,w,h])=>make(x,y,w,h)),
+          planLeaves=children.flatMap(node=>node===child?grandchildren:[node]),
+          planCost=planLeaves.reduce((sum,node)=>sum+node.error,0)+seamPenalty(planLeaves,source.data,source.width,digits),
+          reduction=selected.error-planCost,
+          relative=selected.error?reduction/selected.error:0,
+          gain=reduction/samples,
+          efficiency=reduction/80;
+        if(reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&(!bestPlan||efficiency>bestPlan.efficiency)){
+          child.children=grandchildren;
+          bestPlan={children,leaves:planLeaves,extraBytes:80,reduction,efficiency};
+        }
+      }
+    }
+    if(!bestPlan)continue;
+    selected.children=bestPlan.children;
+    leaves.splice(leaves.indexOf(selected),1,...bestPlan.leaves);
+    size+=bestPlan.extraBytes;
   }
   const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,DICTIONARY_ID);
   let cursor=HEADER_BYTES;
