@@ -228,20 +228,20 @@ function seamPenalty(leaves:Region[],data:Uint8ClampedArray,width:number,digits:
 }
 export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50,minPatchSize=4,objective:EncodeObjective='quality',compressionPriority=70,hooks?:EncodeHooks):EncodeResult {
   if(!digits.length||digits.length>0xffffffff||index.digitCount!==digits.length||source.width>65535||source.height>65535)throw new Error('画像・円周率辞書・特徴インデックスが一致しません');
-  const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+13,Math.floor(raw*savePercent/100));
+  const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+1+GRADIENT_RECORD_BYTES,Math.floor(raw*savePercent/100));
   if(![4,8,16,32].includes(minPatchSize))throw new Error('最小パッチサイズが不正です');
   if(objective!=='quality'&&objective!=='dictionary')throw new Error('最適化目標が不正です');
   const persistence=Math.max(0,Math.min(100,splitPersistence))/100,
-    priority=Math.max(0,Math.min(100,compressionPriority))/100,
+    compression=Math.max(0,Math.min(100,compressionPriority))/100,
     lookaheadChildren=splitPersistence<=0?0:Math.max(1,Math.min(4,Math.ceil(persistence*4))),
-    minRelativeGain=objective==='dictionary'?.06+.12*priority:.045,
-    minGainPerSample=objective==='dictionary'?1.1+1.5*priority:.75,
-    minEfficiency=objective==='dictionary'?70+120*priority:0,
-    areaPower=objective==='dictionary'?.58+.22*priority:.5;
-  const started=performance.now();
+    minRelativeGain=objective==='dictionary'?.06+.12*compression:.045,
+    minGainPerSample=objective==='dictionary'?1.1+1.5*compression:.75,
+    minEfficiency=objective==='dictionary'?70+120*compression:0,
+    areaPower=objective==='dictionary'?.58+.22*compression:.5;
+  const started=performance.now(),maxLeafBytes=1+GRADIENT_RECORD_BYTES;
   let tile=Math.max(16,Math.min(64,Math.ceil(Math.max(source.width,source.height)/8))),cols=Math.ceil(source.width/tile),rows=Math.ceil(source.height/tile);
-  while(HEADER_BYTES+cols*rows*13>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
-  const rootTotal=cols*rows,initialSize=HEADER_BYTES+rootTotal*13;
+  while(HEADER_BYTES+cols*rows*maxLeafBytes>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
+  const rootTotal=cols*rows;
   const emit=(event:Omit<EncodeProgress,'elapsedMs'>)=>hooks?.onProgress?.({...event,elapsedMs:performance.now()-started});
   const pendingPreview:Region[]=[];
   const previewFor=(regions:Region[],force=false)=>{
@@ -254,17 +254,19 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     return preview;
   };
   const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality,objective,compressionPriority);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
-  const roots:Region[]=[],leaves:Region[]=[];let rootDone=0;
+  const roots:Region[]=[],leaves:Region[]=[];let rootDone=0,rootBytes=0;
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){
-    const x=gx*tile,y=gy*tile,node=make(x,y,Math.min(tile,source.width-x),Math.min(tile,source.height-y));roots.push(node);leaves.push(node);rootDone++;
-    emit({phase:'roots',overall:.28*rootDone/rootTotal,done:rootDone,total:rootTotal,attempts:0,patches:leaves.length,bytes:HEADER_BYTES+leaves.length*13,budget,preview:previewFor([node])});
+    const x=gx*tile,y=gy*tile,node=make(x,y,Math.min(tile,source.width-x),Math.min(tile,source.height-y));
+    roots.push(node);leaves.push(node);rootDone++;rootBytes+=leafBytes(node.record);
+    emit({phase:'roots',overall:.28*rootDone/rootTotal,done:rootDone,total:rootTotal,attempts:0,patches:leaves.length,bytes:HEADER_BYTES+rootBytes,budget,preview:previewFor([node])});
   }
+  const initialSize=HEADER_BYTES+rootBytes;
   let size=initialSize,attempts=0;
-  while(size+40<=budget){
-    let selected:Region|undefined,priority=0;
+  while(size<budget){
+    let selected:Region|undefined,selectionPriority=0;
     for(const node of leaves)if(!node.tried&&canSplit(node,minPatchSize)){
       const area=node.w*node.h,errorDensity=node.error/(area*3),score=errorDensity*Math.pow(area,areaPower);
-      if(score>priority){selected=node;priority=score;}
+      if(score>selectionPriority){selected=node;selectionPriority=score;}
     }
     if(!selected)break;
     selected.tried=true;attempts++;
@@ -274,13 +276,14 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
       samples=selected.w*selected.h*3,
       directRelative=selected.error?directReduction/selected.error:0,
       directGain=directReduction/samples,
-      directEff=directReduction/40;
+      directExtra=1+children.reduce((sum,node)=>sum+leafBytes(node.record),0)-leafBytes(selected.record),
+      directEff=directReduction/Math.max(1,directExtra);
     let bestPlan:{children:Region[];leaves:Region[];extraBytes:number;reduction:number;efficiency:number;splitChild?:Region;grandchildren?:Region[]}|undefined;
-    if(directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample&&directEff>=minEfficiency)bestPlan={children,leaves:children,extraBytes:40,reduction:directReduction,efficiency:directEff};
+    if(directExtra>0&&size+directExtra<=budget&&directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample&&directEff>=minEfficiency){
+      bestPlan={children,leaves:children,extraBytes:directExtra,reduction:directReduction,efficiency:directEff};
+    }
 
-    // Speculative lookahead: temporarily split the hardest children. Nothing is committed
-    // until the two-level plan beats the parent after seam cost and byte cost are included.
-    if(lookaheadChildren&&size+80<=budget){
+    if(lookaheadChildren){
       const probe=children.filter(node=>canSplit(node,minPatchSize)).sort((a,b)=>b.error-a.error).slice(0,lookaheadChildren);
       for(const child of probe){
         const grandchildren=partition(child.x,child.y,child.w,child.h).map(([x,y,w,h])=>make(x,y,w,h)),
@@ -289,9 +292,11 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
           reduction=selected.error-planCost,
           relative=selected.error?reduction/selected.error:0,
           gain=reduction/samples,
-          efficiency=reduction/80;
-        if(reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&efficiency>=minEfficiency*.85&&(!bestPlan||efficiency>bestPlan.efficiency)){
-          bestPlan={children,leaves:planLeaves,extraBytes:80,reduction,efficiency,splitChild:child,grandchildren};
+          planTreeBytes=1+children.reduce((sum,node)=>sum+(node===child?1+grandchildren.reduce((inner,g)=>inner+leafBytes(g.record),0):leafBytes(node.record)),0),
+          extraBytes=planTreeBytes-leafBytes(selected.record),
+          efficiency=reduction/Math.max(1,extraBytes);
+        if(extraBytes>0&&size+extraBytes<=budget&&reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&efficiency>=minEfficiency*.85&&(!bestPlan||efficiency>bestPlan.efficiency)){
+          bestPlan={children,leaves:planLeaves,extraBytes,reduction,efficiency,splitChild:child,grandchildren};
         }
       }
     }
@@ -308,38 +313,80 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     emit({phase:'refine',overall:.28+.67*Math.min(1,used/refineTotal),done:used,total:refineTotal,attempts,patches:leaves.length,bytes:size,budget,preview:previewFor(bestPlan.leaves)});
   }
   emit({phase:'final',overall:.97,done:size,total:budget,attempts,patches:leaves.length,bytes:size,budget,preview:previewFor([],true)});
-  const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,DICTIONARY_ID);
+  const serializedSize=HEADER_BYTES+roots.reduce((sum,node)=>sum+subtreeBytes(node),0);
+  if(serializedSize!==size)throw new Error('サイズ計算が一致しません');
+  const bytes=new Uint8Array(serializedSize),view=new DataView(bytes.buffer);
+  MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,DICTIONARY_ID);
   let cursor=HEADER_BYTES;
   const write=(node:Region)=>{
-    if(node.children){view.setUint8(cursor++,1);node.children.forEach(write);return;}
-    view.setUint8(cursor++,0);const r=node.record,p=cursor;cursor+=RECORD_BYTES;
-    view.setUint32(p,r.offset,true);for(let ch=0;ch<3;ch++)view.setUint8(p+4+ch,r.bias[ch]);for(let ch=0;ch<3;ch++)view.setInt8(p+7+ch,r.gain[ch]);view.setUint8(p+10,r.transform|(r.repeat<<3)|(r.phase<<5));const sourceCode=Math.max(0,Math.min(3,Math.round(Math.log2(r.sourceSize))-1));view.setUint8(p+11,(r.gradient?2:r.solid?1:0)|(sourceCode<<2));
+    if(node.children){view.setUint8(cursor++,TAG_SPLIT);node.children.forEach(write);return;}
+    const r=node.record;
+    if(r.gradient){
+      view.setUint8(cursor++,TAG_GRADIENT);
+      const p=cursor;cursor+=GRADIENT_RECORD_BYTES;
+      for(let ch=0;ch<3;ch++)view.setUint8(p+ch,r.bias[ch]);
+      for(let ch=0;ch<3;ch++)view.setInt8(p+3+ch,r.gain[ch]);
+      for(let ch=0;ch<3;ch++)view.setInt8(p+6+ch,rSlopeY(r,ch));
+      return;
+    }
+    if(r.solid){
+      view.setUint8(cursor++,TAG_SOLID);
+      const p=cursor;cursor+=SOLID_RECORD_BYTES;
+      for(let ch=0;ch<3;ch++)view.setUint8(p+ch,r.bias[ch]);
+      return;
+    }
+    view.setUint8(cursor++,TAG_PI);
+    writePacked48(view,cursor,packPiRecord(r));cursor+=RECORD_BYTES;
   };
   roots.forEach(write);
   if(cursor!==bytes.length)throw new Error('サイズ計算が一致しません');
-  const image=decode(bytes,digits),mse=mseOf(source,image),psnr=mse?10*Math.log10(255*255/mse):Infinity,
+  const image=decode(bytes,digits,index),mse=mseOf(source,image),psnr=mse?10*Math.log10(255*255/mse):Infinity,
     piLeaves=leaves.filter(r=>!r.record.solid&&!r.record.gradient),
     piPixels=piLeaves.reduce((sum,r)=>sum+r.w*r.h,0);
   emit({phase:'final',overall:1,done:bytes.length,total:budget,attempts,patches:leaves.length,bytes:bytes.length,budget});
   return{bytes,image,stats:{budgetBytes:budget,actualBytes:bytes.length,ratio:bytes.length/raw*100,tileSize:tile,patches:leaves.length,piPatches:piLeaves.length,piCoverage:piPixels/(source.width*source.height)*100,pixelsPerByte:source.width*source.height/bytes.length,budgetUse:bytes.length/budget*100,objective,mse,psnr}};
 }
-export function decode(bytes:Uint8Array,digits:Uint8Array):ImageData {
+export function decode(bytes:Uint8Array,digits:Uint8Array,index:PiIndex):ImageData {
   const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   if(bytes.length<HEADER_BYTES||MAGIC.some((m,i)=>view.getUint8(i)!==m)||view.getUint8(4)!==FORMAT_VERSION||view.getUint8(23)!==DICTIONARY_ID)throw new Error('対応していない .pipw です');
   const w=view.getUint16(5,true),h=view.getUint16(7,true),tile=view.getUint16(9,true),cols=view.getUint16(11,true),rows=view.getUint16(13,true),need=view.getUint32(15,true),count=view.getUint32(19,true);
-  if(!w||!h||!tile||w*h>16_777_216||digits.length!==need||cols!==Math.ceil(w/tile)||rows!==Math.ceil(h/tile)||count<cols*rows||count>w*h)throw new Error('破損または辞書が一致しません');
+  if(!w||!h||!tile||w*h>16_777_216||digits.length!==need||index.digitCount!==need||cols!==Math.ceil(w/tile)||rows!==Math.ceil(h/tile)||count<cols*rows||count>w*h)throw new Error('破損または辞書が一致しません');
   const out=new ImageData(w,h);let cursor=HEADER_BYTES,seen=0;
   const read=(x0:number,y0:number,tw:number,th:number,depth:number):void=>{
     if(cursor>=bytes.length||depth>16)throw new Error('分割情報が破損しています');
     const tag=view.getUint8(cursor++);
-    if(tag===1){if(tw<8||th<8)throw new Error('分割情報が破損しています');for(const [x,y,a,b] of partition(x0,y0,tw,th))read(x,y,a,b,depth+1);return;}
-    if(tag!==0||cursor+RECORD_BYTES>bytes.length||++seen>count)throw new Error('パッチが破損しています');
-    const p=cursor;cursor+=RECORD_BYTES;
-    const offset=view.getUint32(p,true),bias:[number,number,number]=[view.getUint8(p+4),view.getUint8(p+5),view.getUint8(p+6)],gain:[number,number,number]=[view.getInt8(p+7),view.getInt8(p+8),view.getInt8(p+9)],flags=view.getUint8(p+10),modeByte=view.getUint8(p+11),mode=modeByte&3,sourceSize=1<<(((modeByte>>2)&3)+1);
-    if((flags&0x80)!==0||(modeByte&0xf0)!==0||mode>2||mode===0&&offset+sourceSize*sourceSize>need)throw new Error('パッチが破損しています');
-    const r:Record={offset,bias,gain,transform:flags&7,repeat:(flags>>3)&3,phase:(flags>>5)&3,sourceSize,solid:mode===1,gradient:mode===2};
+    if(tag===TAG_SPLIT){
+      if(tw<8||th<8)throw new Error('分割情報が破損しています');
+      for(const [x,y,a,b] of partition(x0,y0,tw,th))read(x,y,a,b,depth+1);
+      return;
+    }
+    if(++seen>count)throw new Error('パッチが破損しています');
+    let r:Record;
+    if(tag===TAG_PI){
+      if(cursor+RECORD_BYTES>bytes.length)throw new Error('パッチが破損しています');
+      const packed=readPacked48(view,cursor);cursor+=RECORD_BYTES;
+      const sourceCode=bits(packed,0,2),bucket=bits(packed,2,12),slot=bits(packed,14,3),
+        transform=bits(packed,17,3),repeat=bits(packed,20,2),phase=bits(packed,22,2),
+        bias:[number,number,number]=[biasFromCode(bits(packed,24,4)),biasFromCode(bits(packed,28,4)),biasFromCode(bits(packed,32,4))],
+        gain:[number,number,number]=[gainFromCode(bits(packed,36,4)),gainFromCode(bits(packed,40,4)),gainFromCode(bits(packed,44,4))],
+        sourceSize=PI_SOURCE_SIZES[sourceCode],offset=indexedOffsetAt(index,sourceCode,bucket,slot);
+      if(offset===PI_INDEX_EMPTY||offset+sourceSize*sourceSize>need)throw new Error('π参照が壊れています');
+      r={offset,bias,gain,transform,repeat,phase,sourceSize,solid:false,sourceCode,bucket,slot};
+    } else if(tag===TAG_SOLID){
+      if(cursor+SOLID_RECORD_BYTES>bytes.length)throw new Error('パッチが破損しています');
+      const p=cursor;cursor+=SOLID_RECORD_BYTES;
+      r={offset:0,bias:[view.getUint8(p),view.getUint8(p+1),view.getUint8(p+2)],gain:[0,0,0],transform:0,repeat:0,phase:0,sourceSize:4,solid:true};
+    } else if(tag===TAG_GRADIENT){
+      if(cursor+GRADIENT_RECORD_BYTES>bytes.length)throw new Error('パッチが破損しています');
+      const p=cursor;cursor+=GRADIENT_RECORD_BYTES;
+      const gy=[view.getInt8(p+6),view.getInt8(p+7),view.getInt8(p+8)],
+        slopeY=(gy[0]&255)|((gy[1]&255)<<8)|((gy[2]&255)<<16);
+      r={offset:slopeY,bias:[view.getUint8(p),view.getUint8(p+1),view.getUint8(p+2)],gain:[view.getInt8(p+3),view.getInt8(p+4),view.getInt8(p+5)],transform:0,repeat:0,phase:0,sourceSize:4,solid:false,gradient:true};
+    } else throw new Error('パッチが破損しています');
     for(let y=0;y<th;y++)for(let x=0;x<tw;x++){
-      const z=((y0+y)*w+x0+x)*4;for(let ch=0;ch<3;ch++)out.data[z+ch]=pixel(r,digits,x,y,tw,th,ch);out.data[z+3]=255;
+      const z=((y0+y)*w+x0+x)*4;
+      for(let ch=0;ch<3;ch++)out.data[z+ch]=pixel(r,digits,x,y,tw,th,ch);
+      out.data[z+3]=255;
     }
   };
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){const x=gx*tile,y=gy*tile;read(x,y,Math.min(tile,w-x),Math.min(tile,h-y),0);}
