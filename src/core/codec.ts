@@ -216,7 +216,7 @@ function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,
   }
   return model;
 }
-type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; peakBlockError:number; hotRatio:number; children?:Region[]; tried?:boolean };
+type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; meanError:number; peakBlockError:number; hotRatio:number; children?:Region[]; tried?:boolean };
 function localErrorProfile(r:Record,data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,digits:Uint8Array){
   const block=4;let total=0,peakBlockError=0;
   for(let by=0;by<th;by+=block)for(let bx=0;bx<tw;bx+=block){
@@ -228,7 +228,7 @@ function localErrorProfile(r:Record,data:Uint8ClampedArray,width:number,x0:numbe
     total+=local;peakBlockError=Math.max(peakBlockError,local/(bw*bh*3));
   }
   const meanError=total/Math.max(1,tw*th*3);
-  return{peakBlockError,hotRatio:peakBlockError/Math.max(1,meanError)};
+  return{meanError,peakBlockError,hotRatio:peakBlockError/Math.max(1,meanError)};
 }
 function isPiRecord(record:Record){return !record.solid&&!record.gradient;}
 function piPixelsOf(regions:Region[]){return regions.reduce((sum,region)=>sum+(isPiRecord(region.record)?region.w*region.h:0),0);}
@@ -298,7 +298,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     const record=best(source.data,source.width,x,y,w,h,digits,index,quality,objective,compressionPriority,piComposition),
       error=reconstructionError(record,source.data,source.width,x,y,w,h,digits),
       profile=localErrorProfile(record,source.data,source.width,x,y,w,h,digits);
-    return{x,y,w,h,record,error,peakBlockError:profile.peakBlockError,hotRatio:profile.hotRatio};
+    return{x,y,w,h,record,error,meanError:profile.meanError,peakBlockError:profile.peakBlockError,hotRatio:profile.hotRatio};
   };
   const roots:Region[]=[],leaves:Region[]=[];let rootDone=0,rootBytes=0;
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){
@@ -313,7 +313,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     for(const node of leaves)if(!node.tried&&canSplit(node,minPatchSize)){
       const area=node.w*node.h,errorDensity=node.error/(area*3),
         hotspotBoost=objective==='dictionary'&&piPreference>=.8&&isPiRecord(node.record)
-          ?Math.min(3,Math.max(0,node.hotRatio-1.8)*.45+Math.max(0,node.peakBlockError-1200)/1800)
+          ?Math.min(3.5,Math.max(0,node.hotRatio-1.8)*.45+Math.max(0,node.peakBlockError-1200)/1800+Math.max(0,node.meanError-500)/1200)
           :0,
         score=errorDensity*Math.pow(area,areaPower)*(1+hotspotBoost);
       if(score>selectionPriority){selected=node;selectionPriority=score;}
@@ -337,13 +337,18 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
       directCoverageDriven=directPiDelta>0&&piPreference>=.8,
       hotspot=piPreference>=.95&&isPiRecord(selected.record)&&selected.peakBlockError>1600&&selected.hotRatio>2.1,
       childPeak=Math.max(...children.map(node=>node.peakBlockError)),
+      childMean=children.reduce((sum,node)=>sum+node.meanError*node.w*node.h,0)/(selected.w*selected.h),
       directPeakImprovement=(selected.peakBlockError-childPeak)/Math.max(1,selected.peakBlockError),
-      directHotspotRescue=hotspot&&directPeakImprovement>.28;
+      directMeanImprovement=(selected.meanError-childMean)/Math.max(1,selected.meanError),
+      broadFailure=piPreference>=.95&&isPiRecord(selected.record)&&selected.meanError>625,
+      directHotspotRescue=hotspot&&directPeakImprovement>.28,
+      directBroadRescue=broadFailure&&directMeanImprovement>.2,
+      directRescue=directHotspotRescue||directBroadRescue;
     let bestPlan:{children:Region[];leaves:Region[];extraBytes:number;reduction:number;efficiency:number;splitChild?:Region;grandchildren?:Region[]}|undefined;
     const directQualityOk=directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample&&directScore>=minEfficiency,
       directPiOk=directCoverageDriven&&(piPreference>=.999||directScore>=minEfficiency*.35),
-      directPlanScore=directScore+(directHotspotRescue?220:0);
-    if(directExtra>0&&size+directExtra<=budget&&(!directLosesPi||directHotspotRescue)&&(directQualityOk||directPiOk||directHotspotRescue)){
+      directPlanScore=directScore+(directHotspotRescue?220:0)+(directBroadRescue?180:0);
+    if(directExtra>0&&size+directExtra<=budget&&(!directLosesPi||directRescue)&&(directQualityOk||directPiOk||directRescue)){
       bestPlan={children,leaves:children,extraBytes:directExtra,reduction:directReduction,efficiency:directPlanScore};
     }
 
@@ -366,12 +371,16 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
           losesPi=piDelta<0&&piPreference>=.95,
           coverageDriven=piDelta>0&&piPreference>=.8,
           planPeak=Math.max(...planLeaves.map(node=>node.peakBlockError)),
+          planMean=planLeaves.reduce((sum,node)=>sum+node.meanError*node.w*node.h,0)/(selected.w*selected.h),
           planPeakImprovement=(selected.peakBlockError-planPeak)/Math.max(1,selected.peakBlockError),
+          planMeanImprovement=(selected.meanError-planMean)/Math.max(1,selected.meanError),
           hotspotRescue=hotspot&&planPeakImprovement>.22,
+          broadRescue=broadFailure&&planMeanImprovement>.16,
+          rescue=hotspotRescue||broadRescue,
           qualityOk=reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&efficiency>=minEfficiency*.85,
           piOk=coverageDriven&&(piPreference>=.999||efficiency>=minEfficiency*.3),
-          planScore=efficiency+(hotspotRescue?180:0);
-        if(extraBytes>0&&size+extraBytes<=budget&&(!losesPi||hotspotRescue)&&(qualityOk||piOk||hotspotRescue)&&(!bestPlan||planScore>bestPlan.efficiency)){
+          planScore=efficiency+(hotspotRescue?180:0)+(broadRescue?150:0);
+        if(extraBytes>0&&size+extraBytes<=budget&&(!losesPi||rescue)&&(qualityOk||piOk||rescue)&&(!bestPlan||planScore>bestPlan.efficiency)){
           bestPlan={children,leaves:planLeaves,extraBytes,reduction,efficiency:planScore,splitChild:child,grandchildren};
         }
       }
