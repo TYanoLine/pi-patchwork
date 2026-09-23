@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
 import { decode, mseOf, parseDigits, patchRects, type EncodeProgress, type EncodeResult } from "./core/codec";
+import { deblockImage, type PatchRect } from "./core/deblock";
 
 type Quality = 0 | 1 | 2;
 type Comparison = {
@@ -19,19 +20,41 @@ function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
-function applyPreview(canvas: HTMLCanvasElement | null, source: ImageData, progress: EncodeProgress) {
-  if (!canvas) return;
-  if (canvas.width !== source.width || canvas.height !== source.height) {
-    canvas.width = source.width;
-    canvas.height = source.height;
-    const c = canvas.getContext("2d")!;
-    c.fillStyle = "#0c0e0c";
-    c.fillRect(0, 0, source.width, source.height);
+function blankPreview(width: number, height: number) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = 12;
+    data[i + 1] = 14;
+    data[i + 2] = 12;
+    data[i + 3] = 255;
   }
-  const c = canvas.getContext("2d")!;
-  for (const patch of progress.preview ?? []) {
-    c.putImageData(new ImageData(new Uint8ClampedArray(patch.pixels), patch.width, patch.height), patch.x, patch.y);
+  return new ImageData(data, width, height);
+}
+function mergePreview(raw: ImageData, progress: EncodeProgress) {
+  const patches = progress.preview ?? [];
+  if (!patches.length) return;
+  for (const patch of patches) {
+    for (let y = 0; y < patch.height; y++) {
+      const src = y * patch.width * 4,
+        dst = ((patch.y + y) * raw.width + patch.x) * 4;
+      raw.data.set(patch.pixels.subarray(src, src + patch.width * 4), dst);
+    }
   }
+}
+function updatePreviewRects(current: PatchRect[], progress: EncodeProgress) {
+  const patches = progress.preview ?? [];
+  if (!patches.length) return current;
+  const x0 = Math.min(...patches.map((p) => p.x)),
+    y0 = Math.min(...patches.map((p) => p.y)),
+    x1 = Math.max(...patches.map((p) => p.x + p.width)),
+    y1 = Math.max(...patches.map((p) => p.y + p.height));
+  const keep = current.filter(
+    ([x, y, w, h]) => !(x >= x0 && y >= y0 && x + w <= x1 && y + h <= y1),
+  );
+  return [
+    ...keep,
+    ...patches.map((p) => [p.x, p.y, p.width, p.height] as PatchRect),
+  ];
 }
 function draw(
   canvas: HTMLCanvasElement | null,
@@ -55,6 +78,18 @@ function draw(
       }
     }
   }
+}
+
+function drawOutput(
+  canvas: HTMLCanvasElement | null,
+  raw: ImageData,
+  deblock: boolean,
+  rects: PatchRect[],
+  grid = false,
+  tile = 0,
+  bytes?: Uint8Array,
+) {
+  draw(canvas, deblock ? deblockImage(raw, rects) : raw, grid, tile, bytes);
 }
 async function fileToImageData(file: File) {
   const bitmap = await createImageBitmap(file),
@@ -184,11 +219,15 @@ export default function App() {
     [splitPersistence, setSplitPersistence] = useState(55),
     [encodeProgress, setEncodeProgress] = useState<EncodeProgress>(),
     [busy, setBusy] = useState(false),
+    [deblock, setDeblock] = useState(true),
     [grid, setGrid] = useState(true),
     [error, setError] = useState("");
   const original = useRef<HTMLCanvasElement>(null),
     output = useRef<HTMLCanvasElement>(null),
-    worker = useRef<Worker | undefined>(undefined);
+    worker = useRef<Worker | undefined>(undefined),
+    rawPreview = useRef<ImageData>(),
+    previewRects = useRef<PatchRect[]>([]),
+    deblockRef = useRef(true);
   const patchSizes = result ? patchRects(result.bytes).map(([, , w, h]) => Math.max(w, h)) : [];
   const distribution = patchSizes.length
     ? Array.from(new Set(patchSizes)).sort((a, b) => b - a).map((size) => `${size}px: ${patchSizes.filter((value) => value === size).length}枚`).join(" · ")
@@ -215,8 +254,21 @@ export default function App() {
     if (source) draw(original.current, source);
   }, [source]);
   useEffect(() => {
-    if (result) draw(output.current, result.image, grid, result.stats.tileSize, result.bytes);
-  }, [result, grid]);
+    deblockRef.current = deblock;
+    if (result) {
+      drawOutput(
+        output.current,
+        result.image,
+        deblock,
+        patchRects(result.bytes),
+        grid,
+        result.stats.tileSize,
+        result.bytes,
+      );
+    } else if (busy && rawPreview.current) {
+      drawOutput(output.current, rawPreview.current, deblock, previewRects.current);
+    }
+  }, [result, grid, deblock, busy]);
   async function pick(file?: File) {
     if (!file) return;
     setError("");
@@ -224,6 +276,8 @@ export default function App() {
       setSource(await fileToImageData(file));
       setOriginalBytes(file.size);
       setResult(undefined);
+      rawPreview.current = undefined;
+      previewRects.current = [];
       setComparisons([]);
       setComparisonNote("");
     } catch {
@@ -232,6 +286,8 @@ export default function App() {
   }
   function run() {
     if (!source || !digits || !index) return;
+    rawPreview.current = blankPreview(source.width, source.height);
+    previewRects.current = [];
     setBusy(true);
     setEncodeProgress(undefined);
     setResult(undefined);
@@ -252,7 +308,16 @@ export default function App() {
       if (e.data.type === "progress") {
         const progress = e.data.progress as EncodeProgress;
         setEncodeProgress(progress);
-        if (progress.preview?.length) applyPreview(output.current, source, progress);
+        if (progress.preview?.length && rawPreview.current) {
+          mergePreview(rawPreview.current, progress);
+          previewRects.current = updatePreviewRects(previewRects.current, progress);
+          drawOutput(
+            output.current,
+            rawPreview.current,
+            deblockRef.current,
+            previewRects.current,
+          );
+        }
         return;
       }
       if (e.data.type === "error") {
@@ -309,6 +374,8 @@ export default function App() {
         image = decode(bytes, parseDigits(digits)),
         v = new DataView(bytes.buffer);
       setSource(undefined);
+      rawPreview.current = undefined;
+      previewRects.current = [];
       setOriginalBytes(undefined);
       setComparisons([]);
       setComparisonNote("");
@@ -456,16 +523,26 @@ export default function App() {
         <div className="preview">
           <div className="previewHead">
             <span>PREVIEW</span>
-            {result && (
-              <label>
+            <div className="previewToggles">
+              <label title="表示専用の適応型デブロック。エンコードデータ自体は変更しません。">
                 <input
                   type="checkbox"
-                  checked={grid}
-                  onChange={(e) => setGrid(e.target.checked)}
+                  checked={deblock}
+                  onChange={(e) => setDeblock(e.target.checked)}
                 />{" "}
-                パッチ境界
+                境界補正
               </label>
-            )}
+              {result && (
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={grid}
+                    onChange={(e) => setGrid(e.target.checked)}
+                  />{" "}
+                  パッチ境界
+                </label>
+              )}
+            </div>
           </div>
           <div className="canvases">
             <figure className={!source ? "empty" : ""}>
