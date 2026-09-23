@@ -11,6 +11,7 @@ const TAG_SPLIT = 1;
 const TAG_SOLID = 2;
 const TAG_GRADIENT = 3;
 const DICTIONARY_ID = 1;
+const PURE_PI_DICTIONARY_ID = 2;
 export type EncodeObjective = 'quality'|'dictionary';
 export type EncodedStats = { budgetBytes:number; actualBytes:number; ratio:number; tileSize:number; patches:number; piPatches:number; piCoverage:number; pixelsPerByte:number; budgetUse:number; objective:EncodeObjective; mse:number; psnr:number };
 export type EncodeResult = { bytes:Uint8Array; image:ImageData; stats:EncodedStats };
@@ -21,6 +22,7 @@ export type PatchInfo = {
   offset?:number; digitStart?:number; digitCount?:number; sourceSize?:number;
   transform?:number; repeat?:number; phase?:number; bucket?:number; slot?:number;
   gradientY?:[number,number,number];
+  purePi?:boolean;
 };
 export type LivePatchInfo = Omit<PatchInfo,'index'>;
 export type EncodePreviewPatch = { x:number; y:number; width:number; height:number; pixels:Uint8ClampedArray; info:LivePatchInfo };
@@ -40,7 +42,7 @@ export type EncodeHooks = {
   onProgress?:(event:EncodeProgress)=>void;
   shouldPreview?:()=>boolean;
 };
-type Record = { offset:number; bias:[number,number,number]; gain:[number,number,number]; transform:number; repeat:number; phase:number; sourceSize:number; solid:boolean; gradient?:boolean; sourceCode?:number; bucket?:number; slot?:number };
+type Record = { offset:number; bias:[number,number,number]; gain:[number,number,number]; transform:number; repeat:number; phase:number; sourceSize:number; solid:boolean; gradient?:boolean; purePi?:boolean; sourceCode?:number; bucket?:number; slot?:number };
 type Candidate = { offset:number; sourceCode:number; bucket:number; slot:number; transform:number; repeat:number; phase:number; sourceSize:number; score:number };
 
 export function parseDigits(text:string):Uint8Array { return Uint8Array.from(text.replace(/\D/g,''), Number); }
@@ -48,17 +50,29 @@ function transformCell(x:number,y:number,t:number,size:number):[number,number] {
   let a=x,b=y;const max=size-1;if(t&4)a=max-a;const r=t&3;
   if(r===1)return[max-b,a];if(r===2)return[max-a,max-b];if(r===3)return[b,max-a];return[a,b];
 }
-function qAt(d:Uint8Array,off:number,x:number,y:number,t:number,rep:number,phase:number,sourceSize:number,w:number,h:number) {
-  const density=1<<rep,shiftX=phase&1,shiftY=(phase>>1)&1;
-  const ux=(x+.5)*density*sourceSize/w-.5+shiftX,uy=(y+.5)*density*sourceSize/h-.5+shiftY;
-  const x0=Math.floor(ux),y0=Math.floor(uy),fx=ux-x0,fy=uy-y0;
+function sampleDigitPlane(d:Uint8Array,off:number,x:number,y:number,t:number,rep:number,phase:number,sourceSize:number,w:number,h:number,plane=0) {
+  const density=1<<rep,shiftX=phase&1,shiftY=(phase>>1)&1,
+    ux=(x+.5)*density*sourceSize/w-.5+shiftX,uy=(y+.5)*density*sourceSize/h-.5+shiftY,
+    x0=Math.floor(ux),y0=Math.floor(uy),fx=ux-x0,fy=uy-y0,planeOffset=off+plane*sourceSize*sourceSize;
   const sample=(gx:number,gy:number)=>{
     gx=((gx%sourceSize)+sourceSize)%sourceSize;gy=((gy%sourceSize)+sourceSize)%sourceSize;
     [gx,gy]=transformCell(gx,gy,t,sourceSize);
-    return d[off+gy*sourceSize+gx]*2-9;
+    return d[planeOffset+gy*sourceSize+gx];
   };
   const a=sample(x0,y0),b=sample(x0+1,y0),c=sample(x0,y0+1),e=sample(x0+1,y0+1);
   return (a*(1-fx)+b*fx)*(1-fy)+(c*(1-fx)+e*fx)*fy;
+}
+function qAt(d:Uint8Array,off:number,x:number,y:number,t:number,rep:number,phase:number,sourceSize:number,w:number,h:number) {
+  return sampleDigitPlane(d,off,x,y,t,rep,phase,sourceSize,w,h)*2-9;
+}
+function purePiPixel(r:Record,d:Uint8Array,x:number,y:number,tw:number,th:number,ch:number){
+  const yDigit=sampleDigitPlane(d,r.offset,x,y,r.transform,r.repeat,r.phase,r.sourceSize,tw,th,0),
+    cbDigit=sampleDigitPlane(d,r.offset,x,y,r.transform,r.repeat,r.phase,r.sourceSize,tw,th,1),
+    crDigit=sampleDigitPlane(d,r.offset,x,y,r.transform,r.repeat,r.phase,r.sourceSize,tw,th,2),
+    yValue=yDigit*(255/9),cb=(cbDigit-4.5)*18,cr=(crDigit-4.5)*18;
+  if(ch===0)return clamp(yValue+1.402*cr);
+  if(ch===1)return clamp(yValue-.344136*cb-.714136*cr);
+  return clamp(yValue+1.772*cb);
 }
 function clamp(v:number){return Math.max(0,Math.min(255,Math.round(v)));}
 const GAIN_LEVELS=[0,4,8,12,18,26,38,56] as const;
@@ -71,12 +85,11 @@ function gainCode(v:number){
   return sign|best;
 }
 function gainFromCode(code:number){const magnitude=GAIN_LEVELS[code&7];return code&8?-magnitude:magnitude;}
-const PURE_PI_BIAS:[number,number,number]=[136,136,136],PURE_PI_GAIN:[number,number,number]=[12,12,12];
 function purePiRecord(c:Candidate):Record {
   return{
-    offset:c.offset,bias:[...PURE_PI_BIAS],gain:[...PURE_PI_GAIN],
+    offset:c.offset,bias:[0,0,0],gain:[0,0,0],
     transform:c.transform,repeat:c.repeat,phase:c.phase,sourceSize:c.sourceSize,
-    solid:false,sourceCode:c.sourceCode,bucket:c.bucket,slot:c.slot,
+    solid:false,purePi:true,sourceCode:c.sourceCode,bucket:c.bucket,slot:c.slot,
   };
 }
 function quantizePiRecord(r:Record):Record {
@@ -104,6 +117,7 @@ function gradient(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:num
   return{offset:slopeY,bias,gain:gx,transform:0,repeat:0,phase:0,sourceSize:4,solid:false,gradient:true};
 }
 function pixel(r:Record,d:Uint8Array,x:number,y:number,tw:number,th:number,ch:number){
+  if(r.purePi)return purePiPixel(r,d,x,y,tw,th,ch);
   if(r.gradient){const u=tw>1?(2*x-tw+1)/(tw-1):0,v=th>1?(2*y-th+1)/(th-1):0;return clamp(r.bias[ch]+r.gain[ch]*u+rSlopeY(r,ch)*v);}
   return clamp(r.bias[ch]+r.gain[ch]*(r.solid?0:qAt(d,r.offset,x,y,r.transform,r.repeat,r.phase,r.sourceSize,tw,th)));
 }
@@ -116,11 +130,12 @@ function renderRegion(region:Region,digits:Uint8Array):EncodePreviewPatch {
       x:region.x,y:region.y,width:region.w,height:region.h,mode,payloadBytes,totalBytes:1+payloadBytes,
       bias:[...record.bias] as [number,number,number],
       gain:[...record.gain] as [number,number,number],
+      purePi:record.purePi,
     };
   if(mode==='pi'){
     info.offset=record.offset;
     info.digitStart=record.offset+1;
-    info.digitCount=record.sourceSize*record.sourceSize;
+    info.digitCount=record.sourceSize*record.sourceSize*(record.purePi?3:1);
     info.sourceSize=record.sourceSize;
     info.transform=record.transform;
     info.repeat=record.repeat;
@@ -250,7 +265,7 @@ function descriptorScore(target:Float64Array,d:Uint8Array,c:Omit<Candidate,'scor
   for(let ch=0;ch<3;ch++){let sy=0,sxy=0;for(let i=0;i<16;i++){sy+=target[ch*16+i];sxy+=q[i]*target[ch*16+i];}const g=den?(16*sxy-sx*sy)/den:0,b=(sy-g*sx)/16;for(let i=0;i<16;i++){const delta=target[ch*16+i]-(b+g*q[i]);score+=delta*delta;}}
   return score;
 }
-function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,piComposition:number){
+function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,piComposition:number,purePi=false){
   const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),scored:Candidate[]=[],
     piPreference=Math.max(0,Math.min(100,piComposition))/100,
     dictionary=objective==='dictionary';
@@ -272,7 +287,7 @@ function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:nu
     : quality===0?[0,1,2]:[0,1,2,3])
     .filter(code=>PI_SOURCE_SIZES[code]<=Math.max(tw,th)&&PI_SOURCE_SIZES[code]**2<=d.length);
   for(const sourceCode of sourceCodes){
-    const sourceSize=PI_SOURCE_SIZES[sourceCode],maxOffset=d.length-sourceSize*sourceSize,
+    const sourceSize=PI_SOURCE_SIZES[sourceCode],maxOffset=d.length-sourceSize*sourceSize*(purePi?3:1),
       refs=new Map<number,{bucket:number;slot:number}>();
     for(const bucket of hashes){
       for(const ref of indexedReferences(index,sourceCode,bucket,slotLimit)){
@@ -292,6 +307,16 @@ function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:nu
   for(const candidate of pool){
     const frequencyPenalty=frequencyDistance(targetFrequency,frequencySignature8(candidateFrequencyGrid(d,candidate,tw,th)));
     candidate.score*=1+frequencyPenalty*2.4;
+    if(purePi){
+      const record=purePiRecord(candidate);
+      let rgbError=0;
+      for(let sy=0;sy<4;sy++)for(let sx=0;sx<4;sx++){
+        const x=Math.min(tw-1,Math.floor((sx+.5)*tw/4)),y=Math.min(th-1,Math.floor((sy+.5)*th/4)),
+          p=((y0+y)*width+x0+x)*4;
+        for(let ch=0;ch<3;ch++){const delta=data[p+ch]-pixel(record,d,x,y,tw,th,ch);rgbError+=delta*delta;}
+      }
+      candidate.score=rgbError*(1+frequencyPenalty*.8);
+    }
   }
   pool.sort((a,b)=>a.score-b.score);
   return pool.slice(0,keep);
@@ -299,7 +324,7 @@ function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:nu
 function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,compressionPriority:number,piComposition:number,purePi=false){
   if(purePi){
     let raw:Record|undefined,rawError=Infinity;
-    for(const candidate of shortlist(data,width,x0,y0,tw,th,d,index,quality,'dictionary',100)){
+    for(const candidate of shortlist(data,width,x0,y0,tw,th,d,index,quality,'dictionary',100,true)){
       const record=purePiRecord(candidate),error=reconstructionError(record,data,width,x0,y0,tw,th,d);
       if(error<rawError){rawError=error;raw=record;}
     }
@@ -520,7 +545,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
   const serializedSize=HEADER_BYTES+roots.reduce((sum,node)=>sum+subtreeBytes(node),0);
   if(serializedSize!==size)throw new Error('サイズ計算が一致しません');
   const bytes=new Uint8Array(serializedSize),view=new DataView(bytes.buffer);
-  MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,DICTIONARY_ID);
+  MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,purePi?PURE_PI_DICTIONARY_ID:DICTIONARY_ID);
   let cursor=HEADER_BYTES;
   const write=(node:Region)=>{
     if(node.children){view.setUint8(cursor++,TAG_SPLIT);node.children.forEach(write);return;}
