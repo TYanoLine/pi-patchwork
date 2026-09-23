@@ -17,8 +17,15 @@ function transformCell(x:number,y:number,t:number,size:number):[number,number] {
 }
 function qAt(d:Uint8Array,off:number,x:number,y:number,t:number,rep:number,phase:number,sourceSize:number,w:number,h:number) {
   const density=1<<rep,shiftX=phase&1,shiftY=(phase>>1)&1;
-  let gx=(Math.floor((x*density%w)*sourceSize/w)+shiftX)%sourceSize,gy=(Math.floor((y*density%h)*sourceSize/h)+shiftY)%sourceSize;
-  [gx,gy]=transformCell(gx,gy,t,sourceSize);return d[(off+gy*sourceSize+gx)%d.length]*2-9;
+  const ux=(x+.5)*density*sourceSize/w-.5+shiftX,uy=(y+.5)*density*sourceSize/h-.5+shiftY;
+  const x0=Math.floor(ux),y0=Math.floor(uy),fx=ux-x0,fy=uy-y0;
+  const sample=(gx:number,gy:number)=>{
+    gx=((gx%sourceSize)+sourceSize)%sourceSize;gy=((gy%sourceSize)+sourceSize)%sourceSize;
+    [gx,gy]=transformCell(gx,gy,t,sourceSize);
+    return d[off+gy*sourceSize+gx]*2-9;
+  };
+  const a=sample(x0,y0),b=sample(x0+1,y0),c=sample(x0,y0+1),e=sample(x0+1,y0+1);
+  return (a*(1-fx)+b*fx)*(1-fy)+(c*(1-fx)+e*fx)*fy;
 }
 function clamp(v:number){return Math.max(0,Math.min(255,Math.round(v)));}
 function gradient(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number):Record {
@@ -50,7 +57,16 @@ function fit(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,t
   return{offset:c.offset,bias,gain,transform:c.transform,repeat:c.repeat,phase:c.phase,sourceSize:c.sourceSize,solid:false};
 }
 function reconstructionError(r:Record,data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array){
-  let total=0;for(let y=0;y<th;y++)for(let x=0;x<tw;x++){const p=((y0+y)*width+x0+x)*4,edge=x===0||y===0||x===tw-1||y===th-1?1.35:1;for(let ch=0;ch<3;ch++){const delta=data[p+ch]-pixel(r,d,x,y,tw,th,ch);total+=delta*delta*edge;}}return total;
+  let total=0;
+  for(let y=0;y<th;y++)for(let x=0;x<tw;x++){
+    const px=x0+x,py=y0+y,p=(py*width+px)*4;
+    let contrast=0;
+    if(px+1<width){const q=p+4;for(let ch=0;ch<3;ch++)contrast+=Math.abs(data[p+ch]-data[q+ch]);}
+    if(py+1<Math.floor(data.length/4/width)){const q=p+width*4;for(let ch=0;ch<3;ch++)contrast+=Math.abs(data[p+ch]-data[q+ch]);}
+    const detail=1+Math.min(1.5,contrast/192),boundary=x===0||y===0||x===tw-1||y===th-1?1.18:1,weight=detail*boundary;
+    for(let ch=0;ch<3;ch++){const delta=data[p+ch]-pixel(r,d,x,y,tw,th,ch);total+=delta*delta*weight;}
+  }
+  return total;
 }
 function solid(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number):Record {
   const bias:[number,number,number]=[0,0,0],n=tw*th;for(let y=0;y<th;y++)for(let x=0;x<tw;x++){const p=((y0+y)*width+x0+x)*4;for(let ch=0;ch<3;ch++)bias[ch]+=data[p+ch];}for(let ch=0;ch<3;ch++)bias[ch]=clamp(bias[ch]/n);return{offset:0,bias,gain:[0,0,0],transform:0,repeat:0,phase:0,sourceSize:4,solid:true};
@@ -127,7 +143,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     const reduction=selected.error-children.reduce((sum,node)=>sum+node.error,0);
     // Spending 40 more bytes on tiny texture changes makes every region look equally tiled.
     // Keep larger patches unless the split has a perceptible payoff per pixel.
-    if(reduction<selected.error*0.12||reduction<selected.w*selected.h*3*4)continue;
+    if(reduction<selected.error*0.06||reduction<selected.w*selected.h*3*2)continue;
     selected.children=children;leaves.splice(leaves.indexOf(selected),1,...children);size+=40;
   }
   const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,DICTIONARY_ID);
