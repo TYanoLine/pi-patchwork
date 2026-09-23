@@ -272,7 +272,7 @@ export default function App() {
     previewDetails = useRef<PatchInfo[]>([]),
     deblockRef = useRef(true),
     gridRef = useRef(true),
-    inspectAnchor = useRef<{x:number; y:number; left:number; top:number; pinned:boolean}>(),
+    inspectAnchor = useRef<{x:number; y:number; left:number; top:number; pinned:boolean} | undefined>(undefined),
     sourceChosen = useRef(false);
   const parsedIndex = useMemo(() => index ? parsePiIndex(index) : undefined, [index]);
   const patchDetails = useMemo(() => result && parsedIndex ? patchInfos(result.bytes, parsedIndex) : [], [result, parsedIndex]);
