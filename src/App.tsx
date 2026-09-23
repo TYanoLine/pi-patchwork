@@ -16,7 +16,7 @@ type Comparison = {
   delta: number;
   encoder: string;
 };
-const qualityLabels = ["Fast", "Balanced", "Thorough"];
+const qualityLabels = ["高速", "バランス", "徹底的"];
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes.toLocaleString()} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -224,13 +224,13 @@ export default function App() {
   const [comparisons, setComparisons] = useState<Comparison[]>([]),
     [comparing, setComparing] = useState(false),
     [comparisonNote, setComparisonNote] = useState("");
-  const [saving, setSaving] = useState(10),
-    [quality, setQuality] = useState<Quality>(1),
+  const [saving, setSaving] = useState(50),
+    [quality, setQuality] = useState<Quality>(2),
     [objective, setObjective] = useState<EncodeObjective>("dictionary"),
     [compressionPriority, setCompressionPriority] = useState(70),
     [piComposition, setPiComposition] = useState(90),
-    [splitPersistence, setSplitPersistence] = useState(55),
-    [minPatchSize, setMinPatchSize] = useState<MinPatchSize>(16),
+    [splitPersistence, setSplitPersistence] = useState(100),
+    [minPatchSize, setMinPatchSize] = useState<MinPatchSize>(8),
     [encodeProgress, setEncodeProgress] = useState<EncodeProgress>(),
     [busy, setBusy] = useState(false),
     [deblock, setDeblock] = useState(true),
