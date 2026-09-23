@@ -71,13 +71,27 @@ export function transformedFeatureHash(values: ArrayLike<number>, transform: num
   return featureHash(transformed);
 }
 
-export function indexedOffsets(index: PiIndex, sourceCode: number, hash: number, slotLimit: number) {
+export type PiIndexReference = { offset: number; slot: number };
+
+export function indexedReferences(index: PiIndex, sourceCode: number, hash: number, slotLimit: number) {
   const buckets = 1 << index.bucketBits;
   const base = (sourceCode * buckets + hash) * index.slots;
-  const out: number[] = [];
-  for (let i = 0; i < Math.min(slotLimit, index.slots); i++) {
-    const offset = index.entries[base + i];
-    if (offset !== PI_INDEX_EMPTY) out.push(offset);
+  const out: PiIndexReference[] = [];
+  for (let slot = 0; slot < Math.min(slotLimit, index.slots, 8); slot++) {
+    const offset = index.entries[base + slot];
+    if (offset !== PI_INDEX_EMPTY) out.push({ offset, slot });
   }
   return out;
+}
+
+export function indexedOffsets(index: PiIndex, sourceCode: number, hash: number, slotLimit: number) {
+  return indexedReferences(index, sourceCode, hash, slotLimit).map(({ offset }) => offset);
+}
+
+export function indexedOffsetAt(index: PiIndex, sourceCode: number, hash: number, slot: number) {
+  const buckets = 1 << index.bucketBits;
+  if (sourceCode < 0 || sourceCode >= PI_SOURCE_SIZES.length || hash < 0 || hash >= buckets || slot < 0 || slot >= index.slots) {
+    return PI_INDEX_EMPTY;
+  }
+  return index.entries[(sourceCode * buckets + hash) * index.slots + slot];
 }
