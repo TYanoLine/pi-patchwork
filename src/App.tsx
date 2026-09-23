@@ -359,6 +359,17 @@ export default function App() {
   }
   function inspectPatchPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (event.type === "pointermove" && event.pointerType !== "mouse") return;
+    if (event.type === "pointerdown" && event.pointerType !== "mouse" && inspectAnchor.current?.pinned && hoveredPatch) {
+      const rect = event.currentTarget.getBoundingClientRect(),
+        x = ((event.clientX - rect.left) * event.currentTarget.width) / rect.width,
+        y = ((event.clientY - rect.top) * event.currentTarget.height) / rect.height,
+        current = hoveredPatch.info;
+      if (x >= current.x && x < current.x + current.width && y >= current.y && y < current.y + current.height) {
+        inspectAnchor.current = undefined;
+        setHoveredPatch(undefined);
+        return;
+      }
+    }
     inspectPatchAt(event.currentTarget, event.clientX, event.clientY, event.pointerType !== "mouse");
   }
   async function pick(file?: File) {
@@ -779,14 +790,23 @@ export default function App() {
                         <dd>{transformLabel(hoveredPatch.info.transform!)} · repeat {1 << hoveredPatch.info.repeat!}× · phase {hoveredPatch.info.phase! & 1},{(hoveredPatch.info.phase! >> 1) & 1}</dd>
                       </>
                     )}
-                    <dt>bias RGB</dt>
-                    <dd>{triplet(hoveredPatch.info.bias)}</dd>
-                    <dt>{hoveredPatch.info.mode === "gradient" ? "gain X" : "gain RGB"}</dt>
-                    <dd>{triplet(hoveredPatch.info.gain)}</dd>
-                    {hoveredPatch.info.gradientY && (
+                    {hoveredPatch.info.purePi ? (
                       <>
-                        <dt>gain Y</dt>
-                        <dd>{triplet(hoveredPatch.info.gradientY)}</dd>
+                        <dt>RGB</dt>
+                        <dd>π Y / Cb / Cr 3面 · 個別補正なし</dd>
+                      </>
+                    ) : (
+                      <>
+                        <dt>bias RGB</dt>
+                        <dd>{triplet(hoveredPatch.info.bias)}</dd>
+                        <dt>{hoveredPatch.info.mode === "gradient" ? "gain X" : "gain RGB"}</dt>
+                        <dd>{triplet(hoveredPatch.info.gain)}</dd>
+                        {hoveredPatch.info.gradientY && (
+                          <>
+                            <dt>gain Y</dt>
+                            <dd>{triplet(hoveredPatch.info.gradientY)}</dd>
+                          </>
+                        )}
                       </>
                     )}
                   </dl>
