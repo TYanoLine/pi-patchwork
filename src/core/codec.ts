@@ -161,6 +161,9 @@ function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,
 }
 type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; children?:Region[]; tried?:boolean };
 function partition(x:number,y:number,w:number,h:number){const a=Math.floor(w/2),b=Math.floor(h/2);return[[x,y,a,b],[x+a,y,w-a,b],[x,y+b,a,h-b],[x+a,y+b,w-a,h-b]] as const;}
+function canSplit(node:Pick<Region,'x'|'y'|'w'|'h'>,minPatchSize:number){
+  return partition(node.x,node.y,node.w,node.h).every(([, ,w,h])=>w>=minPatchSize&&h>=minPatchSize);
+}
 function pairSeamMismatch(a:Region,b:Region,data:Uint8ClampedArray,width:number,digits:Uint8Array){
   let total=0,count=0;
   if(a.x+a.w===b.x||b.x+b.w===a.x){
@@ -175,9 +178,10 @@ function pairSeamMismatch(a:Region,b:Region,data:Uint8ClampedArray,width:number,
 function seamPenalty(leaves:Region[],data:Uint8ClampedArray,width:number,digits:Uint8Array){
   let total=0;for(let i=0;i<leaves.length;i++)for(let j=i+1;j<leaves.length;j++)total+=pairSeamMismatch(leaves[i],leaves[j],data,width,digits);return total;
 }
-export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50,hooks?:EncodeHooks):EncodeResult {
+export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50,minPatchSize=4,hooks?:EncodeHooks):EncodeResult {
   if(!digits.length||digits.length>0xffffffff||index.digitCount!==digits.length||source.width>65535||source.height>65535)throw new Error('画像・円周率辞書・特徴インデックスが一致しません');
   const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+13,Math.floor(raw*savePercent/100));
+  if(![4,8,16,32].includes(minPatchSize))throw new Error('最小パッチサイズが不正です');
   const persistence=Math.max(0,Math.min(100,splitPersistence))/100,
     lookaheadChildren=splitPersistence<=0?0:Math.max(1,Math.min(4,Math.ceil(persistence*4))),
     minRelativeGain=.045,
@@ -206,7 +210,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
   let size=initialSize,attempts=0;
   while(size+40<=budget){
     let selected:Region|undefined,priority=0;
-    for(const node of leaves)if(!node.tried&&node.w>=8&&node.h>=8){
+    for(const node of leaves)if(!node.tried&&canSplit(node,minPatchSize)){
       const area=node.w*node.h,errorDensity=node.error/(area*3),score=errorDensity*Math.sqrt(area);
       if(score>priority){selected=node;priority=score;}
     }
@@ -225,7 +229,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     // Speculative lookahead: temporarily split the hardest children. Nothing is committed
     // until the two-level plan beats the parent after seam cost and byte cost are included.
     if(lookaheadChildren&&size+80<=budget){
-      const probe=children.filter(node=>node.w>=8&&node.h>=8).sort((a,b)=>b.error-a.error).slice(0,lookaheadChildren);
+      const probe=children.filter(node=>canSplit(node,minPatchSize)).sort((a,b)=>b.error-a.error).slice(0,lookaheadChildren);
       for(const child of probe){
         const grandchildren=partition(child.x,child.y,child.w,child.h).map(([x,y,w,h])=>make(x,y,w,h)),
           planLeaves=children.flatMap(node=>node===child?grandchildren:[node]),
