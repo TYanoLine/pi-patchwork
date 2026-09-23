@@ -463,3 +463,37 @@ footer {
     grid-template-columns: 1fr;
   }
 }
+
+.encodeProgress {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #303630;
+  background: #151915;
+}
+.encodeProgressHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font: 10px monospace;
+  color: #9ca49c;
+}
+.encodeProgressHead b {
+  color: #cce878;
+}
+.progressTrack {
+  height: 7px;
+  margin: 10px 0 8px;
+  overflow: hidden;
+  background: #242924;
+}
+.progressTrack i {
+  display: block;
+  height: 100%;
+  background: #b7d94a;
+  transition: width 120ms linear;
+}
+.encodeProgress small {
+  display: block;
+  color: #747c74;
+  font: 9px/1.6 monospace;
+}
