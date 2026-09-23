@@ -313,7 +313,7 @@ header a {
   z-index: 8;
   width: 300px;
   padding: 10px 12px;
-  pointer-events: none;
+  pointer-events: auto;
   background: rgba(8, 11, 8, 0.96);
   border: 1px solid #79846a;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
