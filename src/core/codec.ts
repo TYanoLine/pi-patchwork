@@ -576,8 +576,10 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
   return{bytes,image,stats:{budgetBytes:budget,actualBytes:bytes.length,ratio:bytes.length/raw*100,tileSize:tile,patches:leaves.length,piPatches:piLeaves.length,piCoverage:piPixels/(source.width*source.height)*100,pixelsPerByte:source.width*source.height/bytes.length,budgetUse:bytes.length/budget*100,objective,mse,psnr}};
 }
 export function decode(bytes:Uint8Array,digits:Uint8Array,index:PiIndex):ImageData {
-  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
-  if(bytes.length<HEADER_BYTES||MAGIC.some((m,i)=>view.getUint8(i)!==m)||view.getUint8(4)!==FORMAT_VERSION||view.getUint8(23)!==DICTIONARY_ID)throw new Error('対応していない .pipw です');
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),
+    dictionaryId=bytes.length>=HEADER_BYTES?view.getUint8(23):0,
+    purePi=dictionaryId===PURE_PI_DICTIONARY_ID;
+  if(bytes.length<HEADER_BYTES||MAGIC.some((m,i)=>view.getUint8(i)!==m)||view.getUint8(4)!==FORMAT_VERSION||(dictionaryId!==DICTIONARY_ID&&!purePi))throw new Error('対応していない .pipw です');
   const w=view.getUint16(5,true),h=view.getUint16(7,true),tile=view.getUint16(9,true),cols=view.getUint16(11,true),rows=view.getUint16(13,true),need=view.getUint32(15,true),count=view.getUint32(19,true);
   if(!w||!h||!tile||w*h>16_777_216||digits.length!==need||index.digitCount!==need||cols!==Math.ceil(w/tile)||rows!==Math.ceil(h/tile)||count<cols*rows||count>w*h)throw new Error('破損または辞書が一致しません');
   const out=new ImageData(w,h);let cursor=HEADER_BYTES,seen=0;
@@ -599,13 +601,15 @@ export function decode(bytes:Uint8Array,digits:Uint8Array,index:PiIndex):ImageDa
         bias:[number,number,number]=[biasFromCode(bits(packed,24,4)),biasFromCode(bits(packed,28,4)),biasFromCode(bits(packed,32,4))],
         gain:[number,number,number]=[gainFromCode(bits(packed,36,4)),gainFromCode(bits(packed,40,4)),gainFromCode(bits(packed,44,4))],
         sourceSize=PI_SOURCE_SIZES[sourceCode],offset=indexedOffsetAt(index,sourceCode,bucket,slot);
-      if(offset===PI_INDEX_EMPTY||offset+sourceSize*sourceSize>need)throw new Error('π参照が壊れています');
-      r={offset,bias,gain,transform,repeat,phase,sourceSize,solid:false,sourceCode,bucket,slot};
+      if(offset===PI_INDEX_EMPTY||offset+sourceSize*sourceSize*(purePi?3:1)>need)throw new Error('π参照が壊れています');
+      r={offset,bias,gain,transform,repeat,phase,sourceSize,solid:false,purePi,sourceCode,bucket,slot};
     } else if(tag===TAG_SOLID){
+      if(purePi)throw new Error('純πパッチが破損しています');
       if(cursor+SOLID_RECORD_BYTES>bytes.length)throw new Error('パッチが破損しています');
       const p=cursor;cursor+=SOLID_RECORD_BYTES;
       r={offset:0,bias:[view.getUint8(p),view.getUint8(p+1),view.getUint8(p+2)],gain:[0,0,0],transform:0,repeat:0,phase:0,sourceSize:4,solid:true};
     } else if(tag===TAG_GRADIENT){
+      if(purePi)throw new Error('純πパッチが破損しています');
       if(cursor+GRADIENT_RECORD_BYTES>bytes.length)throw new Error('パッチが破損しています');
       const p=cursor;cursor+=GRADIENT_RECORD_BYTES;
       const gy=[view.getInt8(p+6),view.getInt8(p+7),view.getInt8(p+8)],
@@ -625,9 +629,10 @@ export function decode(bytes:Uint8Array,digits:Uint8Array,index:PiIndex):ImageDa
 export function mseOf(a:ImageData,b:ImageData){let e=0;for(let i=0;i<a.data.length;i+=4)for(let ch=0;ch<3;ch++){const d=a.data[i+ch]-b.data[i+ch];e+=d*d;}return e/(a.width*a.height*3);}
 export function patchInfos(bytes:Uint8Array,index:PiIndex):PatchInfo[] {
   const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),
+    dictionaryId=bytes.length>=HEADER_BYTES?bytes[23]:0,purePi=dictionaryId===PURE_PI_DICTIONARY_ID,
     w=view.getUint16(5,true),h=view.getUint16(7,true),tile=view.getUint16(9,true),
     cols=view.getUint16(11,true),rows=view.getUint16(13,true),need=view.getUint32(15,true),count=view.getUint32(19,true);
-  if(bytes.length<HEADER_BYTES||bytes[4]!==FORMAT_VERSION||bytes[23]!==DICTIONARY_ID||index.digitCount!==need)throw new Error('対応していない .pipw です');
+  if(bytes.length<HEADER_BYTES||bytes[4]!==FORMAT_VERSION||(dictionaryId!==DICTIONARY_ID&&!purePi)||index.digitCount!==need)throw new Error('対応していない .pipw です');
   const out:PatchInfo[]=[];let cursor=HEADER_BYTES,leafIndex=0;
   const walk=(x:number,y:number,a:number,b:number):void=>{
     if(cursor>=bytes.length)throw new Error('分割情報が破損しています');
@@ -641,12 +646,13 @@ export function patchInfos(bytes:Uint8Array,index:PiIndex):PatchInfo[] {
         transform=bits(packed,17,3),repeat=bits(packed,20,2),phase=bits(packed,22,2),
         bias:[number,number,number]=[biasFromCode(bits(packed,24,4)),biasFromCode(bits(packed,28,4)),biasFromCode(bits(packed,32,4))],
         gain:[number,number,number]=[gainFromCode(bits(packed,36,4)),gainFromCode(bits(packed,40,4)),gainFromCode(bits(packed,44,4))],
-        sourceSize=PI_SOURCE_SIZES[sourceCode],offset=indexedOffsetAt(index,sourceCode,bucket,slot),digitCount=sourceSize*sourceSize;
+        sourceSize=PI_SOURCE_SIZES[sourceCode],offset=indexedOffsetAt(index,sourceCode,bucket,slot),digitCount=sourceSize*sourceSize*(purePi?3:1);
       if(offset===PI_INDEX_EMPTY||offset+digitCount>need)throw new Error('π参照が壊れています');
-      out.push({index:leafIndex,x,y,width:a,height:b,mode:'pi',payloadBytes:RECORD_BYTES,totalBytes:1+RECORD_BYTES,bias,gain,offset,digitStart:offset+1,digitCount,sourceSize,transform,repeat,phase,bucket,slot});
+      out.push({index:leafIndex,x,y,width:a,height:b,mode:'pi',payloadBytes:RECORD_BYTES,totalBytes:1+RECORD_BYTES,bias,gain,offset,digitStart:offset+1,digitCount,sourceSize,transform,repeat,phase,bucket,slot,purePi});
       return;
     }
     if(tag===TAG_SOLID){
+      if(purePi)throw new Error('純πパッチが破損しています');
       if(cursor+SOLID_RECORD_BYTES>bytes.length)throw new Error('パッチが破損しています');
       const p=cursor;cursor+=SOLID_RECORD_BYTES;
       const bias:[number,number,number]=[view.getUint8(p),view.getUint8(p+1),view.getUint8(p+2)];
@@ -654,6 +660,7 @@ export function patchInfos(bytes:Uint8Array,index:PiIndex):PatchInfo[] {
       return;
     }
     if(tag===TAG_GRADIENT){
+      if(purePi)throw new Error('純πパッチが破損しています');
       if(cursor+GRADIENT_RECORD_BYTES>bytes.length)throw new Error('パッチが破損しています');
       const p=cursor;cursor+=GRADIENT_RECORD_BYTES;
       const bias:[number,number,number]=[view.getUint8(p),view.getUint8(p+1),view.getUint8(p+2)],
@@ -670,8 +677,9 @@ export function patchInfos(bytes:Uint8Array,index:PiIndex):PatchInfo[] {
 }
 
 export function patchRects(bytes:Uint8Array):Array<[number,number,number,number]> {
-  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),w=view.getUint16(5,true),h=view.getUint16(7,true),tile=view.getUint16(9,true),cols=view.getUint16(11,true),rows=view.getUint16(13,true);
-  if(bytes.length<HEADER_BYTES||bytes[4]!==FORMAT_VERSION||bytes[23]!==DICTIONARY_ID)throw new Error('対応していない .pipw です');
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),dictionaryId=bytes.length>=HEADER_BYTES?bytes[23]:0,
+    w=view.getUint16(5,true),h=view.getUint16(7,true),tile=view.getUint16(9,true),cols=view.getUint16(11,true),rows=view.getUint16(13,true);
+  if(bytes.length<HEADER_BYTES||bytes[4]!==FORMAT_VERSION||(dictionaryId!==DICTIONARY_ID&&dictionaryId!==PURE_PI_DICTIONARY_ID))throw new Error('対応していない .pipw です');
   const rects:Array<[number,number,number,number]>=[];let cursor=HEADER_BYTES;
   const walk=(x:number,y:number,a:number,b:number):void=>{
     if(cursor>=bytes.length)throw new Error('分割情報が破損しています');
