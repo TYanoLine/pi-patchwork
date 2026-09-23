@@ -471,14 +471,6 @@ export default function App() {
           <span>visual codec experiment</span>
         </div>
       </header>
-      <section className="hero">
-        <p className="eyebrow">
-          <Sparkles /> THE DIGITS BECOME TEXTURE
-        </p>
-        <h1>
-          円周率で、<em>画像を編み直す。</em>
-        </h1>
-      </section>
       <section className="workbench">
         <aside>
           <label className="drop">
@@ -491,113 +483,123 @@ export default function App() {
               onChange={(e) => pick(e.target.files?.[0])}
             />
           </label>
-          <div className="control">
-            <span>最適化目標</span>
-            <div className="segments">
-              <button
-                type="button"
-                className={objective === "dictionary" ? "active" : ""}
-                onClick={() => setObjective("dictionary")}
-              >
-                辞書優先
-              </button>
-              <button
-                type="button"
-                className={objective === "quality" ? "active" : ""}
-                onClick={() => setObjective("quality")}
-              >
-                画質優先
-              </button>
-            </div>
-          </div>
-          <div className="control">
-            <div>
-              <span>保存率上限</span>
-              <b>{saving}%</b>
-            </div>
-            <input
-              type="range"
-              min="2"
-              max="50"
-              value={saving}
-              onChange={(e) => setSaving(+e.target.value)}
-            />
-          </div>
-          {objective === "dictionary" && (
-            <>
+          <details className="parameterPanel">
+            <summary>
+              <span>パラメータ</span>
+              <span className="parameterSummary">
+                保存率 ${saving}% · ${qualityLabels[quality]} · ${minPatchSize}px
+              </span>
+            </summary>
+            <div className="parameterBody">
+              <div className="control">
+                <span>最適化目標</span>
+                <div className="segments">
+                  <button
+                    type="button"
+                    className={objective === "dictionary" ? "active" : ""}
+                    onClick={() => setObjective("dictionary")}
+                  >
+                    辞書優先
+                  </button>
+                  <button
+                    type="button"
+                    className={objective === "quality" ? "active" : ""}
+                    onClick={() => setObjective("quality")}
+                  >
+                    画質優先
+                  </button>
+                </div>
+              </div>
               <div className="control">
                 <div>
-                  <span>辞書圧縮優先度</span>
-                  <b>{compressionPriority}</b>
+                  <span>保存率上限</span>
+                  <b>{saving}%</b>
+                </div>
+                <input
+                  type="range"
+                  min="2"
+                  max="50"
+                  value={saving}
+                  onChange={(e) => setSaving(+e.target.value)}
+                />
+              </div>
+              {objective === "dictionary" && (
+                <>
+                  <div className="control">
+                    <div>
+                      <span>辞書圧縮優先度</span>
+                      <b>{compressionPriority}</b>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      value={compressionPriority}
+                      onChange={(e) => setCompressionPriority(+e.target.value)}
+                    />
+                  </div>
+                  <div className="control">
+                    <div>
+                      <span>π優先度</span>
+                      <b>{piComposition}</b>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      value={piComposition}
+                      onChange={(e) => setPiComposition(+e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+              <div className="control">
+                <span>探索モード</span>
+                <div className="segments">
+                  {qualityLabels.map((q, i) => (
+                    <button
+                      className={quality === i ? "active" : ""}
+                      onClick={() => setQuality(i as Quality)}
+                      key={q}
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="control">
+                <div>
+                  <span>分割粘り</span>
+                  <b>{splitPersistence}</b>
                 </div>
                 <input
                   type="range"
                   min="0"
                   max="100"
                   step="5"
-                  value={compressionPriority}
-                  onChange={(e) => setCompressionPriority(+e.target.value)}
+                  value={splitPersistence}
+                  onChange={(e) => setSplitPersistence(+e.target.value)}
                 />
               </div>
               <div className="control">
-                <div>
-                  <span>π優先度</span>
-                  <b>{piComposition}</b>
+                <span>最小パッチサイズ</span>
+                <div className="segments patchSizes">
+                  {([4, 8, 16, 32] as MinPatchSize[]).map((size) => (
+                    <button
+                      type="button"
+                      className={minPatchSize === size ? "active" : ""}
+                      onClick={() => setMinPatchSize(size)}
+                      key={size}
+                    >
+                      {size}px
+                    </button>
+                  ))}
                 </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="5"
-                  value={piComposition}
-                  onChange={(e) => setPiComposition(+e.target.value)}
-                />
               </div>
-            </>
-          )}
-          <div className="control">
-            <span>探索モード</span>
-            <div className="segments">
-              {qualityLabels.map((q, i) => (
-                <button
-                  className={quality === i ? "active" : ""}
-                  onClick={() => setQuality(i as Quality)}
-                  key={q}
-                >
-                  {q}
-                </button>
-              ))}
             </div>
-          </div>
-          <div className="control">
-            <div>
-              <span>分割粘り</span>
-              <b>{splitPersistence}</b>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              step="5"
-              value={splitPersistence}
-              onChange={(e) => setSplitPersistence(+e.target.value)}
-            />
-          </div>
-          <div className="control">
-            <span>最小パッチサイズ</span>
-            <div className="segments patchSizes">
-              {([4, 8, 16, 32] as MinPatchSize[]).map((size) => (
-                <button
-                  type="button"
-                  className={minPatchSize === size ? "active" : ""}
-                  onClick={() => setMinPatchSize(size)}
-                  key={size}
-                >
-                  {size}px
-                </button>
-              ))}
-            </div>
-          </div>
+          </details>
           <button
             className="primary"
             disabled={!source || !digits || !index || busy}
