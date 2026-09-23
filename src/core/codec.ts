@@ -399,9 +399,17 @@ export function patchRects(bytes:Uint8Array):Array<[number,number,number,number]
   if(bytes.length<HEADER_BYTES||bytes[4]!==FORMAT_VERSION||bytes[23]!==DICTIONARY_ID)throw new Error('対応していない .pipw です');
   const rects:Array<[number,number,number,number]>=[];let cursor=HEADER_BYTES;
   const walk=(x:number,y:number,a:number,b:number):void=>{
-    const tag=bytes[cursor++];if(tag===1){for(const [u,v,m,n] of partition(x,y,a,b))walk(u,v,m,n);return;}
-    rects.push([x,y,a,b]);cursor+=RECORD_BYTES;
+    if(cursor>=bytes.length)throw new Error('分割情報が破損しています');
+    const tag=bytes[cursor++];
+    if(tag===TAG_SPLIT){for(const [u,v,m,n] of partition(x,y,a,b))walk(u,v,m,n);return;}
+    rects.push([x,y,a,b]);
+    if(tag===TAG_PI)cursor+=RECORD_BYTES;
+    else if(tag===TAG_SOLID)cursor+=SOLID_RECORD_BYTES;
+    else if(tag===TAG_GRADIENT)cursor+=GRADIENT_RECORD_BYTES;
+    else throw new Error('パッチが破損しています');
+    if(cursor>bytes.length)throw new Error('パッチが破損しています');
   };
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){const x=gx*tile,y=gy*tile;walk(x,y,Math.min(tile,w-x),Math.min(tile,h-y));}
+  if(cursor!==bytes.length)throw new Error('パッチが破損しています');
   return rects;
 }
