@@ -179,7 +179,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
       directRelative=selected.error?directReduction/selected.error:0,
       directGain=directReduction/samples,
       directEff=directReduction/40;
-    let bestPlan:{children:Region[];leaves:Region[];extraBytes:number;reduction:number;efficiency:number}|undefined;
+    let bestPlan:{children:Region[];leaves:Region[];extraBytes:number;reduction:number;efficiency:number;splitChild?:Region;grandchildren?:Region[]}|undefined;
     if(directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample)bestPlan={children,leaves:children,extraBytes:40,reduction:directReduction,efficiency:directEff};
 
     // Speculative lookahead: temporarily split the hardest children. Nothing is committed
@@ -195,13 +195,13 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
           gain=reduction/samples,
           efficiency=reduction/80;
         if(reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&(!bestPlan||efficiency>bestPlan.efficiency)){
-          child.children=grandchildren;
-          bestPlan={children,leaves:planLeaves,extraBytes:80,reduction,efficiency};
+          bestPlan={children,leaves:planLeaves,extraBytes:80,reduction,efficiency,splitChild:child,grandchildren};
         }
       }
     }
     if(!bestPlan)continue;
     selected.children=bestPlan.children;
+    if(bestPlan.splitChild&&bestPlan.grandchildren)bestPlan.splitChild.children=bestPlan.grandchildren;
     leaves.splice(leaves.indexOf(selected),1,...bestPlan.leaves);
     size+=bestPlan.extraBytes;
   }
