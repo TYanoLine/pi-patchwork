@@ -95,13 +95,13 @@ header a {
   border-right: 1px solid #2c302d;
 }
 .drop {
-  height: 155px;
-  border: 1px dashed #596058;
+  min-height: 44px;
+  border: 1px solid #3b403c;
   display: flex;
   align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 12px;
   color: #aeb4ae;
   cursor: pointer;
   background: #151815;
@@ -109,11 +109,17 @@ header a {
 .drop:hover {
   border-color: #a7ca3c;
 }
+.dropMain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .drop svg {
+  width: 15px;
   color: #b7d94a;
 }
 .drop strong {
-  font-size: 13px;
+  font-size: 11px;
 }
 .drop small,
 .control small {
