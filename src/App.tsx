@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
-import { decode, mseOf, parseDigits, patchRects, type EncodeProgress, type EncodeResult } from "./core/codec";
+import { decode, mseOf, parseDigits, patchRects, type EncodeObjective, type EncodeProgress, type EncodeResult } from "./core/codec";
 import { deblockImage, type PatchRect } from "./core/deblock";
 
 type Quality = 0 | 1 | 2;
@@ -218,8 +218,10 @@ export default function App() {
     [comparisonNote, setComparisonNote] = useState("");
   const [saving, setSaving] = useState(10),
     [quality, setQuality] = useState<Quality>(1),
+    [objective, setObjective] = useState<EncodeObjective>("dictionary"),
+    [compressionPriority, setCompressionPriority] = useState(70),
     [splitPersistence, setSplitPersistence] = useState(55),
-    [minPatchSize, setMinPatchSize] = useState<MinPatchSize>(4),
+    [minPatchSize, setMinPatchSize] = useState<MinPatchSize>(16),
     [encodeProgress, setEncodeProgress] = useState<EncodeProgress>(),
     [busy, setBusy] = useState(false),
     [deblock, setDeblock] = useState(true),
@@ -373,7 +375,7 @@ export default function App() {
       setError("処理中にエラーが発生しました");
     };
     const featureIndex = index.slice(0);
-    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence, minPatchSize }, [
+    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence, minPatchSize, objective, compressionPriority }, [
       image.data.buffer,
       featureIndex,
     ]);
@@ -410,6 +412,10 @@ export default function App() {
           tileSize: v.getUint16(9, true),
           patches: v.getUint32(19, true),
           piPatches: 0,
+          piCoverage: 0,
+          pixelsPerByte: (v.getUint16(5, true) * v.getUint16(7, true)) / bytes.length,
+          budgetUse: 100,
+          objective: "quality",
           mse: 0,
           psnr: 0,
         },
@@ -454,8 +460,30 @@ export default function App() {
             />
           </label>
           <div className="control">
+            <span>最適化目標</span>
+            <div className="segments">
+              <button
+                type="button"
+                className={objective === "dictionary" ? "active" : ""}
+                onClick={() => setObjective("dictionary")}
+              >
+                辞書優先
+              </button>
+              <button
+                type="button"
+                className={objective === "quality" ? "active" : ""}
+                onClick={() => setObjective("quality")}
+              >
+                画質優先
+              </button>
+            </div>
+            <small>
+              辞書優先は大きな領域をπ参照で置き換え、追加byte効率の悪い分割を予算が余っていても止めます。
+            </small>
+          </div>
+          <div className="control">
             <div>
-              <span>保存率</span>
+              <span>保存率上限</span>
               <b>{saving}%</b>
             </div>
             <input
@@ -465,8 +493,27 @@ export default function App() {
               value={saving}
               onChange={(e) => setSaving(+e.target.value)}
             />
-            <small>非圧縮RGBに対する目標サイズ · π辞書 1,000,000桁</small>
+            <small>非圧縮RGBに対する最大サイズ。辞書優先では効率が悪ければこの上限より手前で停止します。</small>
           </div>
+          {objective === "dictionary" && (
+            <div className="control">
+              <div>
+                <span>辞書圧縮優先度</span>
+                <b>{compressionPriority}</b>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={compressionPriority}
+                onChange={(e) => setCompressionPriority(+e.target.value)}
+              />
+              <small>
+                高いほど大きなパッチと辞書参照を優先し、1 byteあたりの改善が小さい分割を強く捨てます。
+              </small>
+            </div>
+          )}
           <div className="control">
             <span>探索モード</span>
             <div className="segments">
@@ -652,6 +699,18 @@ export default function App() {
                   <strong>
                     {result.stats.patches} / {result.stats.piPatches || 0}
                   </strong>
+                </div>
+                <div>
+                  <small>π辞書カバー率</small>
+                  <strong>{result.stats.piCoverage.toFixed(1)}%</strong>
+                </div>
+                <div>
+                  <small>pixels / byte</small>
+                  <strong>{result.stats.pixelsPerByte.toFixed(1)}</strong>
+                </div>
+                <div>
+                  <small>上限使用率</small>
+                  <strong>{result.stats.budgetUse.toFixed(1)}%</strong>
                 </div>
               </div>
               <p className="patchDistribution">パッチ辺長の内訳（最大辺）: {distribution}</p>
