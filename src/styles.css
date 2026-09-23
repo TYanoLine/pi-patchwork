@@ -176,6 +176,16 @@ header a {
 .parameterBody .control:last-child {
   border-bottom: 0;
 }
+.purePiControl label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.purePiControl input {
+  accent-color: #b7d94a;
+}
 .control {
   padding: 24px 0;
   border-bottom: 1px solid #292d2a;
