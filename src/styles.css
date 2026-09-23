@@ -514,3 +514,7 @@ footer {
 .previewToggles input {
   accent-color: #b7d94a;
 }
+
+.patchSizes {
+  grid-template-columns: repeat(4, 1fr);
+}
