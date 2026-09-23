@@ -261,7 +261,7 @@ export default function App() {
       .then(async (blob) => {
         if (sourceChosen.current) return;
         setSource(await blobToImageData(blob));
-        setOriginalBytes(blob.size);
+        setOriginalBytes(undefined);
       })
       .catch(() => {
         // The bundled sample is optional; manual upload still works.
