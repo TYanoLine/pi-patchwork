@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
+import { Download, ImagePlus, LoaderCircle } from "lucide-react";
 import { decode, mseOf, parseDigits, patchInfos, patchRects, type EncodeObjective, type EncodeProgress, type EncodeResult, type PatchInfo } from "./core/codec";
 import { deblockImage, type PatchRect } from "./core/deblock";
 import { parsePiIndex } from "./core/piIndex";
