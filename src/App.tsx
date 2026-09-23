@@ -4,6 +4,7 @@ import { decode, mseOf, parseDigits, patchRects, type EncodeProgress, type Encod
 import { deblockImage, type PatchRect } from "./core/deblock";
 
 type Quality = 0 | 1 | 2;
+type MinPatchSize = 4 | 8 | 16 | 32;
 type Comparison = {
   label: string;
   image: ImageData;
@@ -218,6 +219,7 @@ export default function App() {
   const [saving, setSaving] = useState(10),
     [quality, setQuality] = useState<Quality>(1),
     [splitPersistence, setSplitPersistence] = useState(55),
+    [minPatchSize, setMinPatchSize] = useState<MinPatchSize>(4),
     [encodeProgress, setEncodeProgress] = useState<EncodeProgress>(),
     [busy, setBusy] = useState(false),
     [deblock, setDeblock] = useState(true),
@@ -354,7 +356,7 @@ export default function App() {
       setError("処理中にエラーが発生しました");
     };
     const featureIndex = index.slice(0);
-    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence }, [
+    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence, minPatchSize }, [
       image.data.buffer,
       featureIndex,
     ]);
@@ -478,6 +480,24 @@ export default function App() {
               {splitPersistence === 0
                 ? "1段だけ評価。追加の先読みをしません。"
                 : `弱い分割では難しい子を最大${Math.max(1, Math.min(4, Math.ceil(splitPersistence / 25)))}枚、さらに1段だけ仮探索。改善しなければ親へ戻します。`}
+            </small>
+          </div>
+          <div className="control">
+            <span>最小パッチサイズ</span>
+            <div className="segments patchSizes">
+              {([4, 8, 16, 32] as MinPatchSize[]).map((size) => (
+                <button
+                  type="button"
+                  className={minPatchSize === size ? "active" : ""}
+                  onClick={() => setMinPatchSize(size)}
+                  key={size}
+                >
+                  {size}px
+                </button>
+              ))}
+            </div>
+            <small>
+              空間パッチの下限。小さいほど細部を追えますが、探索時間と境界数が増えます。
             </small>
           </div>
           <button
