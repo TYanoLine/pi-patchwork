@@ -1,9 +1,15 @@
-import { PI_SOURCE_SIZES, indexedOffsets, transformedFeatureHash, type PiIndex } from './piIndex';
+import { PI_INDEX_EMPTY, PI_SOURCE_SIZES, indexedOffsetAt, indexedReferences, transformedFeatureHash, type PiIndex } from './piIndex';
 
 export const HEADER_BYTES = 24;
-export const RECORD_BYTES = 12;
+export const RECORD_BYTES = 6;
+export const SOLID_RECORD_BYTES = 3;
+export const GRADIENT_RECORD_BYTES = 9;
 const MAGIC = [0x50, 0x49, 0x50, 0x57];
-const FORMAT_VERSION = 4;
+const FORMAT_VERSION = 5;
+const TAG_PI = 0;
+const TAG_SPLIT = 1;
+const TAG_SOLID = 2;
+const TAG_GRADIENT = 3;
 const DICTIONARY_ID = 1;
 export type EncodeObjective = 'quality'|'dictionary';
 export type EncodedStats = { budgetBytes:number; actualBytes:number; ratio:number; tileSize:number; patches:number; piPatches:number; piCoverage:number; pixelsPerByte:number; budgetUse:number; objective:EncodeObjective; mse:number; psnr:number };
@@ -25,8 +31,8 @@ export type EncodeHooks = {
   onProgress?:(event:EncodeProgress)=>void;
   shouldPreview?:()=>boolean;
 };
-type Record = { offset:number; bias:[number,number,number]; gain:[number,number,number]; transform:number; repeat:number; phase:number; sourceSize:number; solid:boolean; gradient?:boolean };
-type Candidate = { offset:number; transform:number; repeat:number; phase:number; sourceSize:number; score:number };
+type Record = { offset:number; bias:[number,number,number]; gain:[number,number,number]; transform:number; repeat:number; phase:number; sourceSize:number; solid:boolean; gradient?:boolean; sourceCode?:number; bucket?:number; slot?:number };
+type Candidate = { offset:number; sourceCode:number; bucket:number; slot:number; transform:number; repeat:number; phase:number; sourceSize:number; score:number };
 
 export function parseDigits(text:string):Uint8Array { return Uint8Array.from(text.replace(/\D/g,''), Number); }
 function transformCell(x:number,y:number,t:number,size:number):[number,number] {
@@ -46,6 +52,19 @@ function qAt(d:Uint8Array,off:number,x:number,y:number,t:number,rep:number,phase
   return (a*(1-fx)+b*fx)*(1-fy)+(c*(1-fx)+e*fx)*fy;
 }
 function clamp(v:number){return Math.max(0,Math.min(255,Math.round(v)));}
+const GAIN_LEVELS=[0,4,8,12,18,26,38,56] as const;
+function biasCode(v:number){return Math.max(0,Math.min(15,Math.round(v/17)));}
+function biasFromCode(code:number){return Math.max(0,Math.min(15,code))*17;}
+function gainCode(v:number){
+  const sign=v<0?8:0,absolute=Math.abs(v);
+  let best=0,distance=Infinity;
+  for(let i=0;i<GAIN_LEVELS.length;i++){const delta=Math.abs(absolute-GAIN_LEVELS[i]);if(delta<distance){distance=delta;best=i;}}
+  return sign|best;
+}
+function gainFromCode(code:number){const magnitude=GAIN_LEVELS[code&7];return code&8?-magnitude:magnitude;}
+function quantizePiRecord(r:Record):Record {
+  return {...r,bias:r.bias.map(v=>biasFromCode(biasCode(v))) as [number,number,number],gain:r.gain.map(v=>gainFromCode(gainCode(v))) as [number,number,number]};
+}
 function fitWeight(x:number,y:number,w:number,h:number){
   const edge=x===0||y===0||x===w-1||y===h-1;
   const near=x===1||y===1||x===w-2||y===h-2;
@@ -90,7 +109,7 @@ function fit(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,t
   }
   const gain:[number,number,number]=[0,0,0],bias:[number,number,number]=[0,0,0],den=sw*sq2-sq*sq;
   for(let ch=0;ch<3;ch++){const g=den?Math.round((sw*sqy[ch]-sq*sy[ch])/den):0;gain[ch]=Math.max(-127,Math.min(127,g));bias[ch]=clamp((sy[ch]-gain[ch]*sq)/sw);}
-  return{offset:c.offset,bias,gain,transform:c.transform,repeat:c.repeat,phase:c.phase,sourceSize:c.sourceSize,solid:false};
+  return quantizePiRecord({offset:c.offset,bias,gain,transform:c.transform,repeat:c.repeat,phase:c.phase,sourceSize:c.sourceSize,solid:false,sourceCode:c.sourceCode,bucket:c.bucket,slot:c.slot});
 }
 function reconstructionError(r:Record,data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array){
   let total=0;
@@ -140,14 +159,13 @@ function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:nu
   const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),scored:Candidate[]=[];
   const transforms=quality===0?[0,2]:quality===1?[0,1,2,3]:[0,1,2,3,4,5,6,7],hashes=new Set<number>(),mask=(1<<index.bucketBits)-1;
   for(const transform of transforms){const hash=transformedFeatureHash(feature,transform);hashes.add(hash);hashes.add(hash^mask);}
-  const slotLimit=quality===0?2:quality===1?4:8,keep=quality===0?96:quality===1?192:384,fallback=quality===0?4:quality===1?8:16,repeatCount=quality===0?2:3,phaseCount=quality===0?2:4;
+  const slotLimit=quality===0?2:quality===1?4:8,keep=quality===0?96:quality===1?192:384,repeatCount=quality===0?2:3,phaseCount=quality===0?2:4;
   const sourceCodes=(objective==='dictionary'?[2,3]:quality===0?[0,1,2]:[0,1,2,3]).filter(code=>PI_SOURCE_SIZES[code]<=Math.max(tw,th)&&PI_SOURCE_SIZES[code]**2<=d.length);
   for(const sourceCode of sourceCodes){
-    const sourceSize=PI_SOURCE_SIZES[sourceCode],maxOffset=d.length-sourceSize*sourceSize,offsets=new Set<number>();
-    for(const hash of hashes)for(const offset of indexedOffsets(index,sourceCode,hash,slotLimit))if(offset<=maxOffset)offsets.add(offset);
-    for(let i=0;i<fallback;i++)offsets.add(Math.floor(i*Math.max(1,maxOffset)/fallback));
-    for(const offset of offsets)for(let repeat=0;repeat<repeatCount;repeat++)for(let transform=0;transform<8;transform++)for(let phase=0;phase<phaseCount;phase++){
-      const base={offset,repeat,transform,phase,sourceSize},score=descriptorScore(target,d,base,tw,th);
+    const sourceSize=PI_SOURCE_SIZES[sourceCode],maxOffset=d.length-sourceSize*sourceSize,refs=new Map<number,{bucket:number;slot:number}>();
+    for(const bucket of hashes)for(const ref of indexedReferences(index,sourceCode,bucket,slotLimit))if(ref.offset<=maxOffset&&!refs.has(ref.offset))refs.set(ref.offset,{bucket,slot:ref.slot});
+    for(const [offset,ref] of refs)for(let repeat=0;repeat<repeatCount;repeat++)for(let transform=0;transform<8;transform++)for(let phase=0;phase<phaseCount;phase++){
+      const base={offset,sourceCode,bucket:ref.bucket,slot:ref.slot,repeat,transform,phase,sourceSize},score=descriptorScore(target,d,base,tw,th);
       scored.push({...base,score});
     }
   }
@@ -175,6 +193,21 @@ function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,
   return model;
 }
 type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; children?:Region[]; tried?:boolean };
+function leafBytes(record:Record){return 1+(record.gradient?GRADIENT_RECORD_BYTES:record.solid?SOLID_RECORD_BYTES:RECORD_BYTES);}
+function subtreeBytes(node:Region):number{return node.children?1+node.children.reduce((sum,child)=>sum+subtreeBytes(child),0):leafBytes(node.record);}
+function sourceCodeFor(record:Record){return record.sourceCode??Math.max(0,Math.min(3,Math.round(Math.log2(record.sourceSize))-1));}
+function packPiRecord(record:Record){
+  if(record.bucket===undefined||record.slot===undefined)throw new Error('π参照の索引情報がありません');
+  const fields=[
+    [sourceCodeFor(record),0],[record.bucket,2],[record.slot,14],[record.transform,17],[record.repeat,20],[record.phase,22],
+    [biasCode(record.bias[0]),24],[biasCode(record.bias[1]),28],[biasCode(record.bias[2]),32],
+    [gainCode(record.gain[0]),36],[gainCode(record.gain[1]),40],[gainCode(record.gain[2]),44],
+  ] as const;
+  let packed=0;for(const [value,shift] of fields)packed+=value*2**shift;return packed;
+}
+function writePacked48(view:DataView,offset:number,packed:number){for(let i=0;i<6;i++)view.setUint8(offset+i,Math.floor(packed/2**(i*8))%256);}
+function readPacked48(view:DataView,offset:number){let packed=0;for(let i=0;i<6;i++)packed+=view.getUint8(offset+i)*2**(i*8);return packed;}
+function bits(packed:number,shift:number,width:number){return Math.floor(packed/2**shift)%2**width;}
 function partition(x:number,y:number,w:number,h:number){const a=Math.floor(w/2),b=Math.floor(h/2);return[[x,y,a,b],[x+a,y,w-a,b],[x,y+b,a,h-b],[x+a,y+b,w-a,h-b]] as const;}
 function canSplit(node:Pick<Region,'x'|'y'|'w'|'h'>,minPatchSize:number){
   return partition(node.x,node.y,node.w,node.h).every(([, ,w,h])=>w>=minPatchSize&&h>=minPatchSize);
