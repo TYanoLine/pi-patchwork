@@ -487,7 +487,7 @@ export default function App() {
             <summary>
               <span>パラメータ</span>
               <span className="parameterSummary">
-                保存率 ${saving}% · ${qualityLabels[quality]} · ${minPatchSize}px
+                保存率 {saving}% · {qualityLabels[quality]} · {minPatchSize}px
               </span>
             </summary>
             <div className="parameterBody">
