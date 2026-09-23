@@ -255,6 +255,7 @@ export default function App() {
     [objective, setObjective] = useState<EncodeObjective>("dictionary"),
     [compressionPriority, setCompressionPriority] = useState(70),
     [piComposition, setPiComposition] = useState(90),
+    [purePi, setPurePi] = useState(false),
     [splitPersistence, setSplitPersistence] = useState(100),
     [minPatchSize, setMinPatchSize] = useState<MinPatchSize>(8),
     [encodeProgress, setEncodeProgress] = useState<EncodeProgress>(),
@@ -271,6 +272,7 @@ export default function App() {
     previewDetails = useRef<PatchInfo[]>([]),
     deblockRef = useRef(true),
     gridRef = useRef(true),
+    inspectAnchor = useRef<{x:number; y:number; left:number; top:number; pinned:boolean}>(),
     sourceChosen = useRef(false);
   const parsedIndex = useMemo(() => index ? parsePiIndex(index) : undefined, [index]);
   const patchDetails = useMemo(() => result && parsedIndex ? patchInfos(result.bytes, parsedIndex) : [], [result, parsedIndex]);
@@ -331,9 +333,10 @@ export default function App() {
       drawOutput(output.current, rawPreview.current, deblock, previewRects.current, grid);
     }
   }, [result, grid, deblock, busy]);
-  function inspectPatchAt(canvas: HTMLCanvasElement, clientX: number, clientY: number) {
+  function inspectPatchAt(canvas: HTMLCanvasElement, clientX: number, clientY: number, pinned = false) {
     const details = result ? patchDetails : busy ? previewDetails.current : [];
     if (!grid || !details.length) {
+      if (!pinned) inspectAnchor.current = undefined;
       setHoveredPatch(undefined);
       return;
     }
@@ -342,6 +345,7 @@ export default function App() {
       y = ((clientY - canvasRect.top) * canvas.height) / canvasRect.height,
       info = details.find((patch) => x >= patch.x && x < patch.x + patch.width && y >= patch.y && y < patch.y + patch.height);
     if (!info) {
+      if (!pinned) inspectAnchor.current = undefined;
       setHoveredPatch(undefined);
       return;
     }
@@ -350,11 +354,12 @@ export default function App() {
       width = Math.min(300, Math.max(220, figureRect.width - 16)),
       left = Math.max(8, Math.min(clientX - figureRect.left + 14, figureRect.width - width - 8)),
       top = Math.max(8, Math.min(clientY - figureRect.top + 14, figureRect.height - 210));
+    inspectAnchor.current = { x, y, left, top, pinned };
     setHoveredPatch({ info, left, top });
   }
   function inspectPatchPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (event.type === "pointermove" && event.pointerType !== "mouse") return;
-    inspectPatchAt(event.currentTarget, event.clientX, event.clientY);
+    inspectPatchAt(event.currentTarget, event.clientX, event.clientY, event.pointerType !== "mouse");
   }
   async function pick(file?: File) {
     if (!file) return;
@@ -367,6 +372,8 @@ export default function App() {
       rawPreview.current = undefined;
       previewRects.current = [];
     previewDetails.current = [];
+    inspectAnchor.current = undefined;
+    setHoveredPatch(undefined);
       setComparisons([]);
       setComparisonNote("");
     } catch {
@@ -378,6 +385,8 @@ export default function App() {
     rawPreview.current = blankPreview(source.width, source.height);
     previewRects.current = [];
     previewDetails.current = [];
+    inspectAnchor.current = undefined;
+    setHoveredPatch(undefined);
     setBusy(true);
     setEncodeProgress(undefined);
     setResult(undefined);
@@ -402,7 +411,15 @@ export default function App() {
           mergePreview(rawPreview.current, progress);
           previewRects.current = updatePreviewRects(previewRects.current, progress);
           previewDetails.current = updatePreviewDetails(previewDetails.current, progress);
-          setHoveredPatch(undefined);
+          const anchor = inspectAnchor.current;
+          if (anchor) {
+            const info = previewDetails.current.find((patch) =>
+              anchor.x >= patch.x && anchor.x < patch.x + patch.width &&
+              anchor.y >= patch.y && anchor.y < patch.y + patch.height
+            );
+            if (info) setHoveredPatch({ info, left: anchor.left, top: anchor.top });
+            else if (!anchor.pinned) setHoveredPatch(undefined);
+          }
           drawOutput(
             output.current,
             rawPreview.current,
@@ -446,7 +463,7 @@ export default function App() {
       setError("処理中にエラーが発生しました");
     };
     const featureIndex = index.slice(0);
-    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence, minPatchSize, objective, compressionPriority, piComposition }, [
+    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence, minPatchSize, objective, compressionPriority, piComposition, purePi }, [
       image.data.buffer,
       featureIndex,
     ]);
@@ -471,6 +488,8 @@ export default function App() {
       rawPreview.current = undefined;
       previewRects.current = [];
     previewDetails.current = [];
+    inspectAnchor.current = undefined;
+    setHoveredPatch(undefined);
       setOriginalBytes(undefined);
       setComparisons([]);
       setComparisonNote("");
@@ -581,6 +600,17 @@ export default function App() {
                       value={piComposition}
                       onChange={(e) => setPiComposition(+e.target.value)}
                     />
+                  </div>
+                  <div className="control purePiControl">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={purePi}
+                        disabled={busy}
+                        onChange={(e) => setPurePi(e.target.checked)}
+                      />
+                      <span>純π（個別補正なし）</span>
+                    </label>
                   </div>
                 </>
               )}
@@ -713,7 +743,10 @@ export default function App() {
                   onPointerMove={inspectPatchPointer}
                   onPointerDown={inspectPatchPointer}
                   onPointerLeave={(event) => {
-                    if (event.pointerType === "mouse") setHoveredPatch(undefined);
+                    if (event.pointerType === "mouse") {
+                      inspectAnchor.current = undefined;
+                      setHoveredPatch(undefined);
+                    }
                   }}
                 />
               ) : (
