@@ -518,7 +518,7 @@ export default function App() {
               </div>
               <div className="control">
                 <div>
-                  <span>π構成率</span>
+                  <span>π優先度</span>
                   <b>{piComposition}</b>
                 </div>
                 <input
@@ -530,7 +530,7 @@ export default function App() {
                   onChange={(e) => setPiComposition(+e.target.value)}
                 />
                 <small>
-                  π採用の強さです。高いほどsolid / gradientよりπパッチを優先します。実際の面積比は結果の「π辞書カバー率」で確認できます。
+                  高いほど小さいπ source gridまで解禁し、候補探索を広げ、πを失う分割を抑えます。100ではπ候補がある領域をできるだけπのまま維持します。実測は「π辞書カバー率」で確認できます。
                 </small>
               </div>
             </>
