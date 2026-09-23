@@ -378,11 +378,9 @@ export default function App() {
               onChange={(e) => setSplitPersistence(+e.target.value)}
             />
             <small>
-              {splitPersistence < 35
-                ? "大きいパッチを優先。分割は明確に効く時だけ。"
-                : splitPersistence < 70
-                  ? "標準。合わない大パッチは次の分割まで追います。"
-                  : "細部優先。弱い中間分割も許して深く追います。"}
+              {splitPersistence === 0
+                ? "1段だけ評価。追加の先読みをしません。"
+                : `弱い分割では難しい子を最大${Math.max(1, Math.min(4, Math.ceil(splitPersistence / 25)))}枚、さらに1段だけ仮探索。改善しなければ親へ戻します。`}
             </small>
           </div>
           <button
