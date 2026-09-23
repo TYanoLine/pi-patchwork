@@ -30,7 +30,7 @@ function applyPreview(canvas: HTMLCanvasElement | null, source: ImageData, progr
   }
   const c = canvas.getContext("2d")!;
   for (const patch of progress.preview ?? []) {
-    c.putImageData(new ImageData(patch.pixels, patch.width, patch.height), patch.x, patch.y);
+    c.putImageData(new ImageData(new Uint8ClampedArray(patch.pixels), patch.width, patch.height), patch.x, patch.y);
   }
 }
 function draw(
