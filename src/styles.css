@@ -82,8 +82,8 @@ header a {
   line-height: 1.9;
   font-size: 14px;
 }
-.workbench {
-  margin: 0 max(24px, 5vw);
+ .workbench {
+  margin: 28px max(24px, 5vw) 0;
   border: 1px solid #2c302d;
   display: grid;
   grid-template-columns: 300px 1fr;
@@ -123,6 +123,52 @@ header a {
 .drop input,
 .open input {
   display: none;
+}
+.parameterPanel {
+  margin-top: 14px;
+  border-top: 1px solid #292d2a;
+  border-bottom: 1px solid #292d2a;
+}
+.parameterPanel summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 0;
+  cursor: pointer;
+  font: 11px monospace;
+  color: #c4cac2;
+  user-select: none;
+}
+.parameterPanel summary::-webkit-details-marker {
+  display: none;
+}
+.parameterPanel summary::after {
+  content: "＋";
+  color: #b7d94a;
+  font-size: 14px;
+  line-height: 1;
+}
+.parameterPanel[open] summary::after {
+  content: "−";
+}
+.parameterSummary {
+  margin-left: auto;
+  color: #737a72;
+  font-size: 9px;
+}
+.parameterPanel[open] .parameterSummary {
+  display: none;
+}
+.parameterBody {
+  padding-bottom: 6px;
+}
+.parameterBody .control:first-child {
+  padding-top: 8px;
+}
+.parameterBody .control:last-child {
+  border-bottom: 0;
 }
 .control {
   padding: 24px 0;
