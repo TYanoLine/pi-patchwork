@@ -123,9 +123,14 @@ function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,
 }
 type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; children?:Region[]; tried?:boolean };
 function partition(x:number,y:number,w:number,h:number){const a=Math.floor(w/2),b=Math.floor(h/2);return[[x,y,a,b],[x+a,y,w-a,b],[x,y+b,a,h-b],[x+a,y+b,w-a,h-b]] as const;}
-export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1):EncodeResult {
+export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50):EncodeResult {
   if(!digits.length||digits.length>0xffffffff||index.digitCount!==digits.length||source.width>65535||source.height>65535)throw new Error('画像・円周率辞書・特徴インデックスが一致しません');
   const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+13,Math.floor(raw*savePercent/100));
+  const persistence=Math.max(0,Math.min(100,splitPersistence))/100,
+    minRelativeGain=.10-.085*persistence,
+    minGainPerSample=3-2.6*persistence,
+    poorFitThreshold=220-150*persistence,
+    bridgeGainPerSample=.8-.65*persistence;
   let tile=Math.max(16,Math.min(64,Math.ceil(Math.max(source.width,source.height)/8))),cols=Math.ceil(source.width/tile),rows=Math.ceil(source.height/tile);
   while(HEADER_BYTES+cols*rows*13>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
   const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
@@ -136,14 +141,24 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
   let size=HEADER_BYTES+leaves.length*13;
   while(size+40<=budget){
     let selected:Region|undefined,priority=0;
-    for(const node of leaves)if(!node.tried&&node.w>=8&&node.h>=8&&node.error>priority){selected=node;priority=node.error;}
+    for(const node of leaves)if(!node.tried&&node.w>=8&&node.h>=8){
+      const area=node.w*node.h,errorDensity=node.error/(area*3),score=errorDensity*Math.sqrt(area);
+      if(score>priority){selected=node;priority=score;}
+    }
     if(!selected)break;
     selected.tried=true;
-    const children=partition(selected.x,selected.y,selected.w,selected.h).map(([x,y,w,h])=>make(x,y,w,h));
-    const reduction=selected.error-children.reduce((sum,node)=>sum+node.error,0);
-    // Spending 40 more bytes on tiny texture changes makes every region look equally tiled.
-    // Keep larger patches unless the split has a perceptible payoff per pixel.
-    if(reduction<selected.error*0.06||reduction<selected.w*selected.h*3*2)continue;
+    const children=partition(selected.x,selected.y,selected.w,selected.h).map(([x,y,w,h])=>make(x,y,w,h)),
+      childError=children.reduce((sum,node)=>sum+node.error,0),
+      reduction=selected.error-childError,
+      samples=selected.w*selected.h*3,
+      relativeGain=selected.error?reduction/selected.error:0,
+      gainPerSample=reduction/samples,
+      fitError=selected.error/samples,
+      normalSplit=relativeGain>=minRelativeGain&&gainPerSample>=minGainPerSample,
+      bridgeSplit=fitError>=poorFitThreshold&&reduction>0&&gainPerSample>=bridgeGainPerSample;
+    // Persistence allows a weak first split when the parent itself is visibly poor,
+    // so deeper descendants can spend the byte budget where detail actually lives.
+    if(!normalSplit&&!bridgeSplit)continue;
     selected.children=children;leaves.splice(leaves.indexOf(selected),1,...children);size+=40;
   }
   const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,DICTIONARY_ID);
