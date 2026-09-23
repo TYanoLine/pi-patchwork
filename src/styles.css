@@ -82,8 +82,8 @@ header a {
   line-height: 1.9;
   font-size: 14px;
 }
-.workbench {
-  margin: 0 max(24px, 5vw);
+ .workbench {
+  margin: 28px max(24px, 5vw) 0;
   border: 1px solid #2c302d;
   display: grid;
   grid-template-columns: 300px 1fr;
@@ -95,13 +95,13 @@ header a {
   border-right: 1px solid #2c302d;
 }
 .drop {
-  height: 155px;
-  border: 1px dashed #596058;
+  min-height: 44px;
+  border: 1px solid #3b403c;
   display: flex;
   align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 12px;
   color: #aeb4ae;
   cursor: pointer;
   background: #151815;
@@ -109,11 +109,17 @@ header a {
 .drop:hover {
   border-color: #a7ca3c;
 }
+.dropMain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .drop svg {
+  width: 15px;
   color: #b7d94a;
 }
 .drop strong {
-  font-size: 13px;
+  font-size: 11px;
 }
 .drop small,
 .control small {
@@ -123,6 +129,62 @@ header a {
 .drop input,
 .open input {
   display: none;
+}
+.parameterPanel {
+  margin-top: 14px;
+  border-top: 1px solid #292d2a;
+  border-bottom: 1px solid #292d2a;
+}
+.parameterPanel summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 0;
+  cursor: pointer;
+  font: 11px monospace;
+  color: #c4cac2;
+  user-select: none;
+}
+.parameterPanel summary::-webkit-details-marker {
+  display: none;
+}
+.parameterPanel summary::after {
+  content: "＋";
+  color: #b7d94a;
+  font-size: 14px;
+  line-height: 1;
+}
+.parameterPanel[open] summary::after {
+  content: "−";
+}
+.parameterSummary {
+  margin-left: auto;
+  color: #737a72;
+  font-size: 9px;
+}
+.parameterPanel[open] .parameterSummary {
+  display: none;
+}
+.parameterBody {
+  padding-bottom: 6px;
+}
+.parameterBody .control:first-child {
+  padding-top: 8px;
+}
+.parameterBody .control:last-child {
+  border-bottom: 0;
+}
+.purePiControl label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.purePiControl input {
+  accent-color: #b7d94a;
 }
 .control {
   padding: 24px 0;
@@ -228,6 +290,7 @@ header a {
 .canvases canvas {
   max-width: 100%;
   max-height: 440px;
+  touch-action: manipulation;
 }
 .canvases .empty > div {
   display: flex;
@@ -244,6 +307,47 @@ header a {
   background: #0a0c0acc;
   padding: 6px 8px;
   font: 8px monospace;
+}
+.patchTooltip {
+  position: absolute;
+  z-index: 8;
+  width: 300px;
+  padding: 10px 12px;
+  pointer-events: auto;
+  background: rgba(8, 11, 8, 0.96);
+  border: 1px solid #79846a;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  font: 10px/1.45 monospace;
+  color: #d8ddd1;
+}
+.patchTooltipHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 7px;
+  margin-bottom: 7px;
+  border-bottom: 1px solid #2d332b;
+}
+.patchTooltipHead strong {
+  color: #b8dc45;
+}
+.patchTooltipHead span {
+  color: #8d9887;
+  text-align: right;
+}
+.patchTooltip dl {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 3px 8px;
+  margin: 0;
+}
+.patchTooltip dt {
+  color: #7f897a;
+}
+.patchTooltip dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #edf0e8;
 }
 .stats {
   display: grid;
@@ -462,4 +566,59 @@ footer {
   .how ol {
     grid-template-columns: 1fr;
   }
+}
+
+.encodeProgress {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #303630;
+  background: #151915;
+}
+.encodeProgressHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font: 10px monospace;
+  color: #9ca49c;
+}
+.encodeProgressHead b {
+  color: #cce878;
+}
+.progressTrack {
+  height: 7px;
+  margin: 10px 0 8px;
+  overflow: hidden;
+  background: #242924;
+}
+.progressTrack i {
+  display: block;
+  height: 100%;
+  background: #b7d94a;
+  transition: width 120ms linear;
+}
+.encodeProgress small {
+  display: block;
+  color: #747c74;
+  font: 9px/1.6 monospace;
+}
+
+.previewToggles {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  letter-spacing: 0;
+}
+.previewToggles label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.previewToggles input {
+  accent-color: #b7d94a;
+}
+
+.patchSizes {
+  grid-template-columns: repeat(4, 1fr);
 }

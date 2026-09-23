@@ -1,10 +1,39 @@
 /// <reference lib="webworker" />
-import { encode, parseDigits } from '../core/codec';
-self.onmessage = (event: MessageEvent<{image: ImageData; digits: string; savePercent: number; quality: number}>) => {
+import { encode, parseDigits, type EncodeObjective, type EncodeProgress } from '../core/codec';
+import { parsePiIndex } from '../core/piIndex';
+
+self.onmessage = (event: MessageEvent<{image: ImageData; digits: string; index: ArrayBuffer; savePercent: number; quality: number; splitPersistence: number; minPatchSize: number; objective: EncodeObjective; compressionPriority: number; piComposition: number; purePi: boolean}>) => {
   try {
-    const result = encode(event.data.image, parseDigits(event.data.digits), event.data.savePercent, event.data.quality);
-    self.postMessage({ok: true, result}, [result.bytes.buffer, result.image.data.buffer]);
+    const digits = parseDigits(event.data.digits);
+    const index = parsePiIndex(event.data.index);
+    let lastProgressAt = 0, lastPreviewAt = 0;
+    const onProgress = (progress: EncodeProgress) => {
+      const now = performance.now(), hasPreview = Boolean(progress.preview?.length);
+      if (!hasPreview && progress.phase !== 'final' && now - lastProgressAt < 90) return;
+      const transfer = (progress.preview ?? []).map((patch) => patch.pixels.buffer);
+      self.postMessage({type: 'progress', progress}, transfer);
+      lastProgressAt = now;
+      if (hasPreview) lastPreviewAt = now;
+    };
+    const result = encode(
+      event.data.image,
+      digits,
+      index,
+      event.data.savePercent,
+      event.data.quality,
+      event.data.splitPersistence,
+      event.data.minPatchSize,
+      event.data.objective,
+      event.data.compressionPriority,
+      event.data.piComposition,
+      {
+        onProgress,
+        shouldPreview: () => performance.now() - lastPreviewAt >= 140,
+      },
+      event.data.purePi,
+    );
+    self.postMessage({type: 'result', result}, [result.bytes.buffer, result.image.data.buffer]);
   } catch (error) {
-    self.postMessage({ok: false, error: error instanceof Error ? error.message : String(error)});
+    self.postMessage({type: 'error', error: error instanceof Error ? error.message : String(error)});
   }
 };

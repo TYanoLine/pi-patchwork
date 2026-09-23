@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
-import { decode, mseOf, parseDigits, patchRects, type EncodeResult } from "./core/codec";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { Download, ImagePlus, LoaderCircle } from "lucide-react";
+import { decode, mseOf, parseDigits, patchInfos, patchRects, type EncodeObjective, type EncodeProgress, type EncodeResult, type PatchInfo } from "./core/codec";
+import { deblockImage, type PatchRect } from "./core/deblock";
+import { parsePiIndex } from "./core/piIndex";
 
 type Quality = 0 | 1 | 2;
+type MinPatchSize = 4 | 8 | 16 | 32;
 type Comparison = {
   label: string;
   image: ImageData;
@@ -13,11 +16,72 @@ type Comparison = {
   delta: number;
   encoder: string;
 };
-const qualityLabels = ["Fast", "Balanced", "Thorough"];
+const qualityLabels = ["高速", "バランス", "徹底的"];
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes.toLocaleString()} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+function transformLabel(transform: number) {
+  const rotation = [0, 90, 180, 270][transform & 3];
+  return `${transform & 4 ? "左右反転 + " : ""}${rotation}°`;
+}
+function triplet(values: [number, number, number]) {
+  return `[${values.join(", ")}]`;
+}
+function blankPreview(width: number, height: number) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = 12;
+    data[i + 1] = 14;
+    data[i + 2] = 12;
+    data[i + 3] = 255;
+  }
+  return new ImageData(data, width, height);
+}
+function mergePreview(raw: ImageData, progress: EncodeProgress) {
+  const patches = progress.preview ?? [];
+  if (!patches.length) return;
+  for (const patch of patches) {
+    for (let y = 0; y < patch.height; y++) {
+      const src = y * patch.width * 4,
+        dst = ((patch.y + y) * raw.width + patch.x) * 4;
+      raw.data.set(patch.pixels.subarray(src, src + patch.width * 4), dst);
+    }
+  }
+}
+function updatePreviewRects(current: PatchRect[], progress: EncodeProgress) {
+  const patches = progress.preview ?? [];
+  if (!patches.length) return current;
+  const contains = (a: PatchRect, b: PatchRect) =>
+    b[0] >= a[0] &&
+    b[1] >= a[1] &&
+    b[0] + b[2] <= a[0] + a[2] &&
+    b[1] + b[3] <= a[1] + a[3];
+  let next = [...current];
+  for (const patch of patches) {
+    const rect: PatchRect = [patch.x, patch.y, patch.width, patch.height];
+    next = next.filter((existing) => !contains(existing, rect) && !contains(rect, existing));
+    next.push(rect);
+  }
+  return next;
+}
+function updatePreviewDetails(current: PatchInfo[], progress: EncodeProgress) {
+  const patches = progress.preview ?? [];
+  if (!patches.length) return current;
+  const contains = (a: Pick<PatchInfo, "x" | "y" | "width" | "height">, b: Pick<PatchInfo, "x" | "y" | "width" | "height">) =>
+    b.x >= a.x &&
+    b.y >= a.y &&
+    b.x + b.width <= a.x + a.width &&
+    b.y + b.height <= a.y + a.height;
+  let next = [...current];
+  for (const patch of patches) {
+    const info: PatchInfo = { ...patch.info, index: 0 };
+    next = next.filter((existing) => !contains(existing, info) && !contains(info, existing));
+    next.push(info);
+  }
+  next.sort((a, b) => a.y - b.y || a.x - b.x || b.width * b.height - a.width * a.height);
+  return next.map((info, index) => ({ ...info, index: index + 1 }));
 }
 function draw(
   canvas: HTMLCanvasElement | null,
@@ -42,7 +106,28 @@ function draw(
     }
   }
 }
-async function fileToImageData(file: File) {
+
+function drawOutput(
+  canvas: HTMLCanvasElement | null,
+  raw: ImageData,
+  deblock: boolean,
+  rects: PatchRect[],
+  grid = false,
+  tile = 0,
+  bytes?: Uint8Array,
+) {
+  draw(canvas, deblock ? deblockImage(raw, rects) : raw, grid, tile, bytes);
+  if (!canvas || !grid || bytes || !rects.length) return;
+  const c = canvas.getContext("2d")!,
+    maxSide = Math.max(...rects.map(([, , w, h]) => Math.max(w, h)));
+  for (const [x, y, w, h] of rects) {
+    const scale = Math.max(w, h) / Math.max(1, maxSide);
+    c.strokeStyle = `rgba(255,255,255,${scale >= 0.75 ? 0.42 : scale >= 0.4 ? 0.24 : 0.12})`;
+    c.lineWidth = 1;
+    c.strokeRect(x + 0.5, y + 0.5, w, h);
+  }
+}
+async function blobToImageData(file: Blob) {
   const bitmap = await createImageBitmap(file),
     scale = Math.min(1, 512 / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale)),
@@ -158,44 +243,156 @@ function ComparisonCard({ comparison }: { comparison: Comparison }) {
 }
 export default function App() {
   const [digits, setDigits] = useState(""),
+    [index, setIndex] = useState<ArrayBuffer>(),
     [source, setSource] = useState<ImageData>(),
     [result, setResult] = useState<EncodeResult>();
   const [originalBytes, setOriginalBytes] = useState<number>();
   const [comparisons, setComparisons] = useState<Comparison[]>([]),
     [comparing, setComparing] = useState(false),
     [comparisonNote, setComparisonNote] = useState("");
-  const [saving, setSaving] = useState(10),
-    [quality, setQuality] = useState<Quality>(1),
+  const [saving, setSaving] = useState(50),
+    [quality, setQuality] = useState<Quality>(2),
+    [objective, setObjective] = useState<EncodeObjective>("dictionary"),
+    [compressionPriority, setCompressionPriority] = useState(70),
+    [piComposition, setPiComposition] = useState(90),
+    [purePi, setPurePi] = useState(false),
+    [splitPersistence, setSplitPersistence] = useState(100),
+    [minPatchSize, setMinPatchSize] = useState<MinPatchSize>(8),
+    [encodeProgress, setEncodeProgress] = useState<EncodeProgress>(),
     [busy, setBusy] = useState(false),
+    [deblock, setDeblock] = useState(true),
     [grid, setGrid] = useState(true),
+    [hoveredPatch, setHoveredPatch] = useState<{info:PatchInfo; left:number; top:number}>(),
     [error, setError] = useState("");
   const original = useRef<HTMLCanvasElement>(null),
     output = useRef<HTMLCanvasElement>(null),
-    worker = useRef<Worker | undefined>(undefined);
+    worker = useRef<Worker | undefined>(undefined),
+    rawPreview = useRef<ImageData | undefined>(undefined),
+    previewRects = useRef<PatchRect[]>([]),
+    previewDetails = useRef<PatchInfo[]>([]),
+    deblockRef = useRef(true),
+    gridRef = useRef(true),
+    inspectAnchor = useRef<{x:number; y:number; left:number; top:number; pinned:boolean} | undefined>(undefined),
+    patchTooltip = useRef<HTMLDivElement>(null),
+    dismissedTouchPointer = useRef<number | undefined>(undefined),
+    sourceChosen = useRef(false);
+  const parsedIndex = useMemo(() => index ? parsePiIndex(index) : undefined, [index]);
+  const patchDetails = useMemo(() => result && parsedIndex ? patchInfos(result.bytes, parsedIndex) : [], [result, parsedIndex]);
   const patchSizes = result ? patchRects(result.bytes).map(([, , w, h]) => Math.max(w, h)) : [];
   const distribution = patchSizes.length
     ? Array.from(new Set(patchSizes)).sort((a, b) => b - a).map((size) => `${size}px: ${patchSizes.filter((value) => value === size).length}枚`).join(" · ")
     : "";
   useEffect(() => {
-    fetch("/pi-10k.txt")
-      .then((r) => r.text())
-      .then(setDigits)
-      .catch(() => setError("円周率辞書を読み込めませんでした"));
+    Promise.all([
+      fetch("/pi-1m.txt").then((r) => {
+        if (!r.ok) throw new Error();
+        return r.text();
+      }),
+      fetch("/pi-index-1m.bin").then((r) => {
+        if (!r.ok) throw new Error();
+        return r.arrayBuffer();
+      }),
+    ])
+      .then(([text, featureIndex]) => {
+        setDigits(text);
+        setIndex(featureIndex);
+      })
+      .catch(() => setError("100万桁の円周率辞書または特徴インデックスを読み込めませんでした"));
+
+    fetch("/cicada-default.webp")
+      .then((r) => {
+        if (!r.ok) throw new Error();
+        return r.blob();
+      })
+      .then(async (blob) => {
+        if (sourceChosen.current) return;
+        setSource(await blobToImageData(blob));
+        setOriginalBytes(undefined);
+      })
+      .catch(() => {
+        // The bundled sample is optional; manual upload still works.
+      });
+
     return () => worker.current?.terminate();
   }, []);
   useEffect(() => {
     if (source) draw(original.current, source);
   }, [source]);
   useEffect(() => {
-    if (result) draw(output.current, result.image, grid, result.stats.tileSize, result.bytes);
-  }, [result, grid]);
+    if (!hoveredPatch || !inspectAnchor.current?.pinned) return;
+    const dismissOutside = (event: PointerEvent) => {
+      if (event.pointerType === "mouse") return;
+      const target = event.target;
+      if (target instanceof Node && patchTooltip.current?.contains(target)) return;
+      dismissedTouchPointer.current = event.pointerId;
+      inspectAnchor.current = undefined;
+      setHoveredPatch(undefined);
+    };
+    document.addEventListener("pointerdown", dismissOutside, true);
+    return () => document.removeEventListener("pointerdown", dismissOutside, true);
+  }, [hoveredPatch]);
+  useEffect(() => {
+    deblockRef.current = deblock;
+    gridRef.current = grid;
+    if (result) {
+      drawOutput(
+        output.current,
+        result.image,
+        deblock,
+        patchRects(result.bytes),
+        grid,
+        result.stats.tileSize,
+        result.bytes,
+      );
+    } else if (busy && rawPreview.current) {
+      drawOutput(output.current, rawPreview.current, deblock, previewRects.current, grid);
+    }
+  }, [result, grid, deblock, busy]);
+  function inspectPatchAt(canvas: HTMLCanvasElement, clientX: number, clientY: number, pinned = false) {
+    const details = result ? patchDetails : busy ? previewDetails.current : [];
+    if (!grid || !details.length) {
+      if (!pinned) inspectAnchor.current = undefined;
+      setHoveredPatch(undefined);
+      return;
+    }
+    const canvasRect = canvas.getBoundingClientRect(),
+      x = ((clientX - canvasRect.left) * canvas.width) / canvasRect.width,
+      y = ((clientY - canvasRect.top) * canvas.height) / canvasRect.height,
+      info = details.find((patch) => x >= patch.x && x < patch.x + patch.width && y >= patch.y && y < patch.y + patch.height);
+    if (!info) {
+      if (!pinned) inspectAnchor.current = undefined;
+      setHoveredPatch(undefined);
+      return;
+    }
+    const figure = canvas.parentElement!,
+      figureRect = figure.getBoundingClientRect(),
+      width = Math.min(300, Math.max(220, figureRect.width - 16)),
+      left = Math.max(8, Math.min(clientX - figureRect.left + 14, figureRect.width - width - 8)),
+      top = Math.max(8, Math.min(clientY - figureRect.top + 14, figureRect.height - 210));
+    inspectAnchor.current = { x, y, left, top, pinned };
+    setHoveredPatch({ info, left, top });
+  }
+  function inspectPatchPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
+    if (event.type === "pointermove" && event.pointerType !== "mouse") return;
+    if (event.type === "pointerdown" && event.pointerType !== "mouse" && dismissedTouchPointer.current === event.pointerId) {
+      dismissedTouchPointer.current = undefined;
+      return;
+    }
+    inspectPatchAt(event.currentTarget, event.clientX, event.clientY, event.pointerType !== "mouse");
+  }
   async function pick(file?: File) {
     if (!file) return;
+    sourceChosen.current = true;
     setError("");
     try {
-      setSource(await fileToImageData(file));
+      setSource(await blobToImageData(file));
       setOriginalBytes(file.size);
       setResult(undefined);
+      rawPreview.current = undefined;
+      previewRects.current = [];
+    previewDetails.current = [];
+    inspectAnchor.current = undefined;
+    setHoveredPatch(undefined);
       setComparisons([]);
       setComparisonNote("");
     } catch {
@@ -203,8 +400,17 @@ export default function App() {
     }
   }
   function run() {
-    if (!source || !digits) return;
+    if (!source || !digits || !index) return;
+    rawPreview.current = blankPreview(source.width, source.height);
+    previewRects.current = [];
+    previewDetails.current = [];
+    inspectAnchor.current = undefined;
+    setHoveredPatch(undefined);
     setBusy(true);
+    setEncodeProgress(undefined);
+    setResult(undefined);
+    setComparisons([]);
+    setComparisonNote("");
     setError("");
     worker.current?.terminate();
     const w = new Worker(new URL("./workers/encoder.ts", import.meta.url), {
@@ -217,12 +423,42 @@ export default function App() {
       source.height,
     );
     w.onmessage = async (e) => {
-      setBusy(false);
-      w.terminate();
-      if (!e.data.ok) {
+      if (e.data.type === "progress") {
+        const progress = e.data.progress as EncodeProgress;
+        setEncodeProgress(progress);
+        if (progress.preview?.length && rawPreview.current) {
+          mergePreview(rawPreview.current, progress);
+          previewRects.current = updatePreviewRects(previewRects.current, progress);
+          previewDetails.current = updatePreviewDetails(previewDetails.current, progress);
+          const anchor = inspectAnchor.current;
+          if (anchor) {
+            const info = previewDetails.current.find((patch) =>
+              anchor.x >= patch.x && anchor.x < patch.x + patch.width &&
+              anchor.y >= patch.y && anchor.y < patch.y + patch.height
+            );
+            if (info) setHoveredPatch({ info, left: anchor.left, top: anchor.top });
+            else if (!anchor.pinned) setHoveredPatch(undefined);
+          }
+          drawOutput(
+            output.current,
+            rawPreview.current,
+            deblockRef.current,
+            previewRects.current,
+            gridRef.current,
+          );
+        }
+        return;
+      }
+      if (e.data.type === "error") {
+        setBusy(false);
+        w.terminate();
         setError(e.data.error);
         return;
       }
+      if (e.data.type !== "result") return;
+      setBusy(false);
+      setEncodeProgress(undefined);
+      w.terminate();
       const encoded = e.data.result as EncodeResult;
       setResult(encoded);
       setComparing(true);
@@ -245,8 +481,10 @@ export default function App() {
       setBusy(false);
       setError("処理中にエラーが発生しました");
     };
-    w.postMessage({ image, digits, savePercent: saving, quality }, [
+    const featureIndex = index.slice(0);
+    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence, minPatchSize, objective, compressionPriority, piComposition, purePi }, [
       image.data.buffer,
+      featureIndex,
     ]);
   }
   function save() {
@@ -259,12 +497,18 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
   async function openPipw(file?: File) {
-    if (!file || !digits) return;
+    if (!file || !digits || !index) return;
+    sourceChosen.current = true;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer()),
-        image = decode(bytes, parseDigits(digits)),
+        image = decode(bytes, parseDigits(digits), parsedIndex!),
         v = new DataView(bytes.buffer);
       setSource(undefined);
+      rawPreview.current = undefined;
+      previewRects.current = [];
+    previewDetails.current = [];
+    inspectAnchor.current = undefined;
+    setHoveredPatch(undefined);
       setOriginalBytes(undefined);
       setComparisons([]);
       setComparisonNote("");
@@ -278,6 +522,10 @@ export default function App() {
           tileSize: v.getUint16(9, true),
           patches: v.getUint32(19, true),
           piPatches: 0,
+          piCoverage: 0,
+          pixelsPerByte: (v.getUint16(5, true) * v.getUint16(7, true)) / bytes.length,
+          budgetUse: 100,
+          objective: "quality",
           mse: 0,
           psnr: 0,
         },
@@ -288,75 +536,179 @@ export default function App() {
   }
   return (
     <main>
-      <header>
-        <div className="mark">
-          <Pi />
-        </div>
-        <div>
-          <b>PI PATCHWORK</b>
-          <span>visual codec experiment</span>
-        </div>
-        <a href="#how">How it works</a>
-      </header>
-      <section className="hero">
-        <p className="eyebrow">
-          <Sparkles /> THE DIGITS BECOME TEXTURE
-        </p>
-        <h1>
-          円周率で、<em>画像を編み直す。</em>
-        </h1>
-        <p>
-          円周率の桁を共有パターンとして参照し、色補正・回転・反転・繰り返しで画像を再構成する不可逆コーデックです。
-        </p>
-      </section>
       <section className="workbench">
         <aside>
           <label className="drop">
-            <ImagePlus />
-            <strong>画像を選択</strong>
-            <small>PNG / JPEG / WebP · 最大辺512px</small>
+            <span className="dropMain">
+              <ImagePlus />
+              <strong>画像を選択</strong>
+            </span>
+            <small>PNG / JPEG / WebP</small>
             <input
               type="file"
               accept="image/*"
               onChange={(e) => pick(e.target.files?.[0])}
             />
           </label>
-          <div className="control">
-            <div>
-              <span>保存率</span>
-              <b>{saving}%</b>
+          <details className="parameterPanel">
+            <summary>
+              <span>パラメータ</span>
+              <span className="parameterSummary">
+                保存率 {saving}% · {qualityLabels[quality]} · {minPatchSize}px
+              </span>
+            </summary>
+            <div className="parameterBody">
+              <div className="control">
+                <span>最適化目標</span>
+                <div className="segments">
+                  <button
+                    type="button"
+                    className={objective === "dictionary" ? "active" : ""}
+                    onClick={() => setObjective("dictionary")}
+                  >
+                    辞書優先
+                  </button>
+                  <button
+                    type="button"
+                    className={objective === "quality" ? "active" : ""}
+                    onClick={() => setObjective("quality")}
+                  >
+                    画質優先
+                  </button>
+                </div>
+              </div>
+              <div className="control">
+                <div>
+                  <span>保存率上限</span>
+                  <b>{saving}%</b>
+                </div>
+                <input
+                  type="range"
+                  min="2"
+                  max="50"
+                  value={saving}
+                  onChange={(e) => setSaving(+e.target.value)}
+                />
+              </div>
+              {objective === "dictionary" && (
+                <>
+                  <div className="control">
+                    <div>
+                      <span>辞書圧縮優先度</span>
+                      <b>{compressionPriority}</b>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      value={compressionPriority}
+                      onChange={(e) => setCompressionPriority(+e.target.value)}
+                    />
+                  </div>
+                  <div className="control">
+                    <div>
+                      <span>π優先度</span>
+                      <b>{piComposition}</b>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      value={piComposition}
+                      onChange={(e) => setPiComposition(+e.target.value)}
+                    />
+                  </div>
+                  <div className="control purePiControl">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={purePi}
+                        disabled={busy}
+                        onChange={(e) => setPurePi(e.target.checked)}
+                      />
+                      <span>純π（個別補正なし）</span>
+                    </label>
+                  </div>
+                </>
+              )}
+              <div className="control">
+                <span>探索モード</span>
+                <div className="segments">
+                  {qualityLabels.map((q, i) => (
+                    <button
+                      className={quality === i ? "active" : ""}
+                      onClick={() => setQuality(i as Quality)}
+                      key={q}
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="control">
+                <div>
+                  <span>分割粘り</span>
+                  <b>{splitPersistence}</b>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="5"
+                  value={splitPersistence}
+                  onChange={(e) => setSplitPersistence(+e.target.value)}
+                />
+              </div>
+              <div className="control">
+                <span>最小パッチサイズ</span>
+                <div className="segments patchSizes">
+                  {([4, 8, 16, 32] as MinPatchSize[]).map((size) => (
+                    <button
+                      type="button"
+                      className={minPatchSize === size ? "active" : ""}
+                      onClick={() => setMinPatchSize(size)}
+                      key={size}
+                    >
+                      {size}px
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
-            <input
-              type="range"
-              min="2"
-              max="50"
-              value={saving}
-              onChange={(e) => setSaving(+e.target.value)}
-            />
-            <small>非圧縮RGBに対する目標サイズ</small>
-          </div>
-          <div className="control">
-            <span>探索モード</span>
-            <div className="segments">
-              {qualityLabels.map((q, i) => (
-                <button
-                  className={quality === i ? "active" : ""}
-                  onClick={() => setQuality(i as Quality)}
-                  key={q}
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
-          </div>
+          </details>
           <button
             className="primary"
-            disabled={!source || !digits || busy}
+            disabled={!source || !digits || !index || busy}
             onClick={run}
           >
-            {busy ? <LoaderCircle className="spin" /> : <Sparkles />}
+            {busy && <LoaderCircle className="spin" />}
             {busy ? "探索中…" : "再構成する"}
           </button>
+          {busy && (
+            <div className="encodeProgress">
+              <div className="encodeProgressHead">
+                <span>
+                  {encodeProgress?.phase === "roots"
+                    ? "初期パッチを探索中"
+                    : encodeProgress?.phase === "final"
+                      ? "最終画像を組み立て中"
+                      : "分割候補を精査中"}
+                </span>
+                <b>{Math.round((encodeProgress?.overall ?? 0) * 100)}%</b>
+              </div>
+              <div className="progressTrack">
+                <i style={{ width: `${Math.round((encodeProgress?.overall ?? 0) * 100)}%` }} />
+              </div>
+              <small>
+                {encodeProgress?.phase === "roots"
+                  ? `${encodeProgress.done} / ${encodeProgress.total} 初期パッチ`
+                  : `${encodeProgress?.attempts ?? 0}候補 · ${encodeProgress?.patches ?? 0} patches`}
+                {encodeProgress ? ` · ${formatBytes(encodeProgress.bytes)} / ${formatBytes(encodeProgress.budget)} · ${(encodeProgress.elapsedMs / 1000).toFixed(1)}s` : ""}
+              </small>
+            </div>
+          )}
           <label className="open">
             .pipw を開く
             <input
@@ -370,16 +722,26 @@ export default function App() {
         <div className="preview">
           <div className="previewHead">
             <span>PREVIEW</span>
-            {result && (
-              <label>
+            <div className="previewToggles">
+              <label title="表示専用の適応型デブロック。エンコードデータ自体は変更しません。">
                 <input
                   type="checkbox"
-                  checked={grid}
-                  onChange={(e) => setGrid(e.target.checked)}
+                  checked={deblock}
+                  onChange={(e) => setDeblock(e.target.checked)}
                 />{" "}
-                パッチ境界
+                境界補正
               </label>
-            )}
+              {(result || busy) && (
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={grid}
+                    onChange={(e) => setGrid(e.target.checked)}
+                  />{" "}
+                  パッチ境界
+                </label>
+              )}
+            </div>
           </div>
           <div className="canvases">
             <figure className={!source ? "empty" : ""}>
@@ -393,16 +755,71 @@ export default function App() {
               )}
               <figcaption>ORIGINAL</figcaption>
             </figure>
-            <figure className={!result ? "empty" : ""}>
-              {result ? (
-                <canvas ref={output} />
+            <figure className={!result && !busy ? "empty" : ""}>
+              {result || busy ? (
+                <canvas
+                  ref={output}
+                  onPointerMove={inspectPatchPointer}
+                  onPointerDown={inspectPatchPointer}
+                  onPointerLeave={(event) => {
+                    if (event.pointerType === "mouse") {
+                      inspectAnchor.current = undefined;
+                      setHoveredPatch(undefined);
+                    }
+                  }}
+                />
               ) : (
                 <div>
-                  <Pi />
                   <span>再構成結果</span>
                 </div>
               )}
-              <figcaption>PI PATCHWORK</figcaption>
+              {grid && hoveredPatch && (
+                <div ref={patchTooltip} className="patchTooltip" style={{ left: hoveredPatch.left, top: hoveredPatch.top }}>
+                  <div className="patchTooltipHead">
+                    <strong>{busy && !result ? "LIVE " : ""}PATCH #{hoveredPatch.info.index}</strong>
+                    <span>{hoveredPatch.info.mode.toUpperCase()} · {hoveredPatch.info.width}×{hoveredPatch.info.height}px · {hoveredPatch.info.totalBytes}B</span>
+                  </div>
+                  <dl>
+                    <dt>位置</dt>
+                    <dd>x {hoveredPatch.info.x}, y {hoveredPatch.info.y}</dd>
+                    {hoveredPatch.info.mode === "pi" && (
+                      <>
+                        <dt>π 桁</dt>
+                        <dd>
+                          小数点以下 {hoveredPatch.info.digitStart?.toLocaleString()}〜
+                          {(hoveredPatch.info.digitStart! + hoveredPatch.info.digitCount! - 1).toLocaleString()}
+                          {" "}({hoveredPatch.info.digitCount}桁)
+                        </dd>
+                        <dt>source</dt>
+                        <dd>{hoveredPatch.info.sourceSize}×{hoveredPatch.info.sourceSize} · offset {hoveredPatch.info.offset?.toLocaleString()}</dd>
+                        <dt>index</dt>
+                        <dd>bucket {hoveredPatch.info.bucket} · slot {hoveredPatch.info.slot}</dd>
+                        <dt>変換</dt>
+                        <dd>{transformLabel(hoveredPatch.info.transform!)} · repeat {1 << hoveredPatch.info.repeat!}× · phase {hoveredPatch.info.phase! & 1},{(hoveredPatch.info.phase! >> 1) & 1}</dd>
+                      </>
+                    )}
+                    {hoveredPatch.info.purePi ? (
+                      <>
+                        <dt>RGB</dt>
+                        <dd>π Y / Cb / Cr 3面 · 個別補正なし</dd>
+                      </>
+                    ) : (
+                      <>
+                        <dt>bias RGB</dt>
+                        <dd>{triplet(hoveredPatch.info.bias)}</dd>
+                        <dt>{hoveredPatch.info.mode === "gradient" ? "gain X" : "gain RGB"}</dt>
+                        <dd>{triplet(hoveredPatch.info.gain)}</dd>
+                        {hoveredPatch.info.gradientY && (
+                          <>
+                            <dt>gain Y</dt>
+                            <dd>{triplet(hoveredPatch.info.gradientY)}</dd>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </dl>
+                </div>
+              )}
             </figure>
           </div>
           {result && (
@@ -451,6 +868,18 @@ export default function App() {
                     {result.stats.patches} / {result.stats.piPatches || 0}
                   </strong>
                 </div>
+                <div>
+                  <small>π辞書カバー率</small>
+                  <strong>{result.stats.piCoverage.toFixed(1)}%</strong>
+                </div>
+                <div>
+                  <small>pixels / byte</small>
+                  <strong>{result.stats.pixelsPerByte.toFixed(1)}</strong>
+                </div>
+                <div>
+                  <small>上限使用率</small>
+                  <strong>{result.stats.budgetUse.toFixed(1)}%</strong>
+                </div>
               </div>
               <p className="patchDistribution">パッチ辺長の内訳（最大辺）: {distribution}</p>
               {source && (
@@ -486,37 +915,7 @@ export default function App() {
           )}
         </div>
       </section>
-      <section className="how" id="how">
-        <span>HOW IT WORKS</span>
-        <h2>
-          画像ではなく、<em>作り方</em>を保存する。
-        </h2>
-        <ol>
-          <li>
-            <b>01</b>
-            <strong>分割</strong>
-          <p>細部は小さく、なめらかな場所は大きなパッチに分けます。</p>
-          </li>
-          <li>
-            <b>02</b>
-            <strong>特徴探索</strong>
-            <p>4×4の色特徴から候補を絞ります。</p>
-          </li>
-          <li>
-            <b>03</b>
-            <strong>補正</strong>
-          <p>単色・グラデーション・π模様から選び、色や向きを調整します。</p>
-          </li>
-          <li>
-            <b>04</b>
-            <strong>再構成</strong>
-            <p>境界も評価して参照値から描き直します。</p>
-          </li>
-        </ol>
-      </section>
-      <footer>
-        πの正規性や圧縮効率は保証されません。画像はブラウザ内だけで処理されます。
-      </footer>
+
     </main>
   );
 }
