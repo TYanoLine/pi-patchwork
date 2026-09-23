@@ -93,7 +93,7 @@ function drawOutput(
 ) {
   draw(canvas, deblock ? deblockImage(raw, rects) : raw, grid, tile, bytes);
 }
-async function fileToImageData(file: File) {
+async function blobToImageData(file: Blob) {
   const bitmap = await createImageBitmap(file),
     scale = Math.min(1, 512 / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale)),
@@ -230,7 +230,8 @@ export default function App() {
     worker = useRef<Worker | undefined>(undefined),
     rawPreview = useRef<ImageData | undefined>(undefined),
     previewRects = useRef<PatchRect[]>([]),
-    deblockRef = useRef(true);
+    deblockRef = useRef(true),
+    sourceChosen = useRef(false);
   const patchSizes = result ? patchRects(result.bytes).map(([, , w, h]) => Math.max(w, h)) : [];
   const distribution = patchSizes.length
     ? Array.from(new Set(patchSizes)).sort((a, b) => b - a).map((size) => `${size}px: ${patchSizes.filter((value) => value === size).length}枚`).join(" · ")
@@ -251,6 +252,21 @@ export default function App() {
         setIndex(featureIndex);
       })
       .catch(() => setError("100万桁の円周率辞書または特徴インデックスを読み込めませんでした"));
+
+    fetch("/cicada-default.webp")
+      .then((r) => {
+        if (!r.ok) throw new Error();
+        return r.blob();
+      })
+      .then(async (blob) => {
+        if (sourceChosen.current) return;
+        setSource(await blobToImageData(blob));
+        setOriginalBytes(blob.size);
+      })
+      .catch(() => {
+        // The bundled sample is optional; manual upload still works.
+      });
+
     return () => worker.current?.terminate();
   }, []);
   useEffect(() => {
@@ -274,9 +290,10 @@ export default function App() {
   }, [result, grid, deblock, busy]);
   async function pick(file?: File) {
     if (!file) return;
+    sourceChosen.current = true;
     setError("");
     try {
-      setSource(await fileToImageData(file));
+      setSource(await blobToImageData(file));
       setOriginalBytes(file.size);
       setResult(undefined);
       rawPreview.current = undefined;
@@ -372,6 +389,7 @@ export default function App() {
   }
   async function openPipw(file?: File) {
     if (!file || !digits) return;
+    sourceChosen.current = true;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer()),
         image = decode(bytes, parseDigits(digits)),
