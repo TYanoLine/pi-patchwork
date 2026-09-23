@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
 import { decode, mseOf, parseDigits, patchRects, type EncodeObjective, type EncodeProgress, type EncodeResult } from "./core/codec";
 import { deblockImage, type PatchRect } from "./core/deblock";
+import { parsePiIndex } from "./core/piIndex";
 
 type Quality = 0 | 1 | 2;
 type MinPatchSize = 4 | 8 | 16 | 32;
@@ -390,11 +391,11 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
   async function openPipw(file?: File) {
-    if (!file || !digits) return;
+    if (!file || !digits || !index) return;
     sourceChosen.current = true;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer()),
-        image = decode(bytes, parseDigits(digits)),
+        image = decode(bytes, parseDigits(digits), parsePiIndex(index)),
         v = new DataView(bytes.buffer);
       setSource(undefined);
       rawPreview.current = undefined;
