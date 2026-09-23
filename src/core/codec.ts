@@ -585,14 +585,15 @@ export function patchInfos(bytes:Uint8Array,index:PiIndex):PatchInfo[] {
     }
     if(tag===TAG_SOLID){
       if(cursor+SOLID_RECORD_BYTES>bytes.length)throw new Error('パッチが破損しています');
-      const p=cursor;cursor+=SOLID_RECORD_BYTES,bias:[number,number,number]=[view.getUint8(p),view.getUint8(p+1),view.getUint8(p+2)];
+      const p=cursor;cursor+=SOLID_RECORD_BYTES;
+      const bias:[number,number,number]=[view.getUint8(p),view.getUint8(p+1),view.getUint8(p+2)];
       out.push({index:leafIndex,x,y,width:a,height:b,mode:'solid',payloadBytes:SOLID_RECORD_BYTES,totalBytes:1+SOLID_RECORD_BYTES,bias,gain:[0,0,0]});
       return;
     }
     if(tag===TAG_GRADIENT){
       if(cursor+GRADIENT_RECORD_BYTES>bytes.length)throw new Error('パッチが破損しています');
-      const p=cursor;cursor+=GRADIENT_RECORD_BYTES,
-        bias:[number,number,number]=[view.getUint8(p),view.getUint8(p+1),view.getUint8(p+2)],
+      const p=cursor;cursor+=GRADIENT_RECORD_BYTES;
+      const bias:[number,number,number]=[view.getUint8(p),view.getUint8(p+1),view.getUint8(p+2)],
         gain:[number,number,number]=[view.getInt8(p+3),view.getInt8(p+4),view.getInt8(p+5)],
         gradientY:[number,number,number]=[view.getInt8(p+6),view.getInt8(p+7),view.getInt8(p+8)];
       out.push({index:leafIndex,x,y,width:a,height:b,mode:'gradient',payloadBytes:GRADIENT_RECORD_BYTES,totalBytes:1+GRADIENT_RECORD_BYTES,bias,gain,gradientY});
