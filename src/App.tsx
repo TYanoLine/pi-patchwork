@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, ImagePlus, LoaderCircle, Pi, Sparkles } from "lucide-react";
-import { decode, mseOf, parseDigits, patchRects, type EncodeResult } from "./core/codec";
+import { decode, mseOf, parseDigits, patchRects, type EncodeProgress, type EncodeResult } from "./core/codec";
 
 type Quality = 0 | 1 | 2;
 type Comparison = {
@@ -18,6 +18,20 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes.toLocaleString()} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+function applyPreview(canvas: HTMLCanvasElement | null, source: ImageData, progress: EncodeProgress) {
+  if (!canvas) return;
+  if (canvas.width !== source.width || canvas.height !== source.height) {
+    canvas.width = source.width;
+    canvas.height = source.height;
+    const c = canvas.getContext("2d")!;
+    c.fillStyle = "#0c0e0c";
+    c.fillRect(0, 0, source.width, source.height);
+  }
+  const c = canvas.getContext("2d")!;
+  for (const patch of progress.preview ?? []) {
+    c.putImageData(new ImageData(patch.pixels, patch.width, patch.height), patch.x, patch.y);
+  }
 }
 function draw(
   canvas: HTMLCanvasElement | null,
@@ -168,6 +182,7 @@ export default function App() {
   const [saving, setSaving] = useState(10),
     [quality, setQuality] = useState<Quality>(1),
     [splitPersistence, setSplitPersistence] = useState(55),
+    [encodeProgress, setEncodeProgress] = useState<EncodeProgress>(),
     [busy, setBusy] = useState(false),
     [grid, setGrid] = useState(true),
     [error, setError] = useState("");
@@ -218,6 +233,10 @@ export default function App() {
   function run() {
     if (!source || !digits || !index) return;
     setBusy(true);
+    setEncodeProgress(undefined);
+    setResult(undefined);
+    setComparisons([]);
+    setComparisonNote("");
     setError("");
     worker.current?.terminate();
     const w = new Worker(new URL("./workers/encoder.ts", import.meta.url), {
@@ -230,12 +249,22 @@ export default function App() {
       source.height,
     );
     w.onmessage = async (e) => {
-      setBusy(false);
-      w.terminate();
-      if (!e.data.ok) {
+      if (e.data.type === "progress") {
+        const progress = e.data.progress as EncodeProgress;
+        setEncodeProgress(progress);
+        if (progress.preview?.length) applyPreview(output.current, source, progress);
+        return;
+      }
+      if (e.data.type === "error") {
+        setBusy(false);
+        w.terminate();
         setError(e.data.error);
         return;
       }
+      if (e.data.type !== "result") return;
+      setBusy(false);
+      setEncodeProgress(undefined);
+      w.terminate();
       const encoded = e.data.result as EncodeResult;
       setResult(encoded);
       setComparing(true);
@@ -391,6 +420,29 @@ export default function App() {
             {busy ? <LoaderCircle className="spin" /> : <Sparkles />}
             {busy ? "探索中…" : "再構成する"}
           </button>
+          {busy && (
+            <div className="encodeProgress">
+              <div className="encodeProgressHead">
+                <span>
+                  {encodeProgress?.phase === "roots"
+                    ? "初期パッチを探索中"
+                    : encodeProgress?.phase === "final"
+                      ? "最終画像を組み立て中"
+                      : "分割候補を精査中"}
+                </span>
+                <b>{Math.round((encodeProgress?.overall ?? 0) * 100)}%</b>
+              </div>
+              <div className="progressTrack">
+                <i style={{ width: `${Math.round((encodeProgress?.overall ?? 0) * 100)}%` }} />
+              </div>
+              <small>
+                {encodeProgress?.phase === "roots"
+                  ? `${encodeProgress.done} / ${encodeProgress.total} 初期パッチ`
+                  : `${encodeProgress?.attempts ?? 0}候補 · ${encodeProgress?.patches ?? 0} patches`}
+                {encodeProgress ? ` · ${formatBytes(encodeProgress.bytes)} / ${formatBytes(encodeProgress.budget)} · ${(encodeProgress.elapsedMs / 1000).toFixed(1)}s` : ""}
+              </small>
+            </div>
+          )}
           <label className="open">
             .pipw を開く
             <input
@@ -427,8 +479,8 @@ export default function App() {
               )}
               <figcaption>ORIGINAL</figcaption>
             </figure>
-            <figure className={!result ? "empty" : ""}>
-              {result ? (
+            <figure className={!result && !busy ? "empty" : ""}>
+              {result || busy ? (
                 <canvas ref={output} />
               ) : (
                 <div>
