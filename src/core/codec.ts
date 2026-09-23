@@ -155,15 +155,37 @@ function principalDescriptor(target:Float64Array){
 function descriptorScore(target:Float64Array,d:Uint8Array,c:Omit<Candidate,'score'>,tw:number,th:number){
   let sx=0,sxx=0,score=0;const q=new Float64Array(16);for(let i=0;i<16;i++){const x=Math.min(tw-1,Math.floor((i%4+.5)*tw/4)),y=Math.min(th-1,Math.floor((Math.floor(i/4)+.5)*th/4));q[i]=qAt(d,c.offset,x,y,c.transform,c.repeat,c.phase,c.sourceSize,tw,th);sx+=q[i];sxx+=q[i]*q[i];}const den=16*sxx-sx*sx;for(let ch=0;ch<3;ch++){let sy=0,sxy=0;for(let i=0;i<16;i++){sy+=target[ch*16+i];sxy+=q[i]*target[ch*16+i];}const g=den?(16*sxy-sx*sy)/den:0,b=(sy-g*sx)/16;for(let i=0;i<16;i++){const delta=target[ch*16+i]-(b+g*q[i]);score+=delta*delta;}}return score;
 }
-function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective){
-  const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),scored:Candidate[]=[];
-  const transforms=quality===0?[0,2]:quality===1?[0,1,2,3]:[0,1,2,3,4,5,6,7],hashes=new Set<number>(),mask=(1<<index.bucketBits)-1;
+function shortlist(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,index:PiIndex,quality:number,objective:EncodeObjective,piComposition:number){
+  const target=colorDescriptor(data,width,x0,y0,tw,th),feature=principalDescriptor(target),scored:Candidate[]=[],
+    piPreference=Math.max(0,Math.min(100,piComposition))/100,
+    dictionary=objective==='dictionary';
+  const transforms=quality===0?[0,2]:quality===1?[0,1,2,3]:[0,1,2,3,4,5,6,7],
+    hashes=new Set<number>(),mask=(1<<index.bucketBits)-1;
   for(const transform of transforms){const hash=transformedFeatureHash(feature,transform);hashes.add(hash);hashes.add(hash^mask);}
-  const slotLimit=quality===0?2:quality===1?4:8,keep=quality===0?96:quality===1?192:384,repeatCount=quality===0?2:3,phaseCount=quality===0?2:4;
-  const sourceCodes=(objective==='dictionary'?[2,3]:quality===0?[0,1,2]:[0,1,2,3]).filter(code=>PI_SOURCE_SIZES[code]<=Math.max(tw,th)&&PI_SOURCE_SIZES[code]**2<=d.length);
+  if(dictionary&&piPreference>=.6){
+    const seeds=[...hashes];
+    for(const hash of seeds)for(let bit=0;bit<index.bucketBits;bit++)hashes.add(hash^(1<<bit));
+  }
+  const baseSlotLimit=quality===0?2:quality===1?4:8,
+    slotLimit=dictionary&&piPreference>=.75?Math.min(8,index.slots):baseSlotLimit,
+    keep=dictionary?(piPreference>=.95?640:piPreference>=.7?448:256):(quality===0?96:quality===1?192:384),
+    repeatCount=quality===0?2:3,
+    phaseCount=quality===0?2:4,
+    refTarget=dictionary?(piPreference>=.95?28:piPreference>=.7?20:12):Infinity;
+  const sourceCodes=(dictionary
+    ? piPreference>=.8?[0,1,2,3]:piPreference>=.4?[1,2,3]:[2,3]
+    : quality===0?[0,1,2]:[0,1,2,3])
+    .filter(code=>PI_SOURCE_SIZES[code]<=Math.max(tw,th)&&PI_SOURCE_SIZES[code]**2<=d.length);
   for(const sourceCode of sourceCodes){
-    const sourceSize=PI_SOURCE_SIZES[sourceCode],maxOffset=d.length-sourceSize*sourceSize,refs=new Map<number,{bucket:number;slot:number}>();
-    for(const bucket of hashes)for(const ref of indexedReferences(index,sourceCode,bucket,slotLimit))if(ref.offset<=maxOffset&&!refs.has(ref.offset))refs.set(ref.offset,{bucket,slot:ref.slot});
+    const sourceSize=PI_SOURCE_SIZES[sourceCode],maxOffset=d.length-sourceSize*sourceSize,
+      refs=new Map<number,{bucket:number;slot:number}>();
+    for(const bucket of hashes){
+      for(const ref of indexedReferences(index,sourceCode,bucket,slotLimit)){
+        if(ref.offset<=maxOffset&&!refs.has(ref.offset))refs.set(ref.offset,{bucket,slot:ref.slot});
+        if(refs.size>=refTarget)break;
+      }
+      if(refs.size>=refTarget)break;
+    }
     for(const [offset,ref] of refs)for(let repeat=0;repeat<repeatCount;repeat++)for(let transform=0;transform<8;transform++)for(let phase=0;phase<phaseCount;phase++){
       const base={offset,sourceCode,bucket:ref.bucket,slot:ref.slot,repeat,transform,phase,sourceSize},score=descriptorScore(target,d,base,tw,th);
       scored.push({...base,score});
@@ -178,7 +200,7 @@ function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,
   if(slopeError<modelError){model=slope;modelError=slopeError;}
   if(objective==='quality'&&modelError<tw*th*3)return model;
   let piRecord:Record|undefined,piError=Infinity;
-  for(const candidate of shortlist(data,width,x0,y0,tw,th,d,index,quality,objective)){
+  for(const candidate of shortlist(data,width,x0,y0,tw,th,d,index,quality,objective,piComposition)){
     const record=fit(data,width,x0,y0,tw,th,d,candidate),
       error=reconstructionError(record,data,width,x0,y0,tw,th,d);
     if(error<piError){piError=error;piRecord=record;}
@@ -195,6 +217,8 @@ function best(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,
   return model;
 }
 type Region = { x:number; y:number; w:number; h:number; record:Record; error:number; children?:Region[]; tried?:boolean };
+function isPiRecord(record:Record){return !record.solid&&!record.gradient;}
+function piPixelsOf(regions:Region[]){return regions.reduce((sum,region)=>sum+(isPiRecord(region.record)?region.w*region.h:0),0);}
 function leafBytes(record:Record){return 1+(record.gradient?GRADIENT_RECORD_BYTES:record.solid?SOLID_RECORD_BYTES:RECORD_BYTES);}
 function subtreeBytes(node:Region):number{return node.children?1+node.children.reduce((sum,child)=>sum+subtreeBytes(child),0):leafBytes(node.record);}
 function sourceCodeFor(record:Record){return record.sourceCode??Math.max(0,Math.min(3,Math.round(Math.log2(record.sourceSize))-1));}
@@ -240,7 +264,8 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
     minRelativeGain=objective==='dictionary'?.06+.12*compression:.045,
     minGainPerSample=objective==='dictionary'?1.1+1.5*compression:.75,
     minEfficiency=objective==='dictionary'?70+120*compression:0,
-    areaPower=objective==='dictionary'?.58+.22*compression:.5;
+    areaPower=objective==='dictionary'?.58+.22*compression:.5,
+    piPreference=objective==='dictionary'?Math.max(0,Math.min(100,piComposition))/100:0;
   const started=performance.now(),maxLeafBytes=1+GRADIENT_RECORD_BYTES;
   let tile=Math.max(16,Math.min(64,Math.ceil(Math.max(source.width,source.height)/8))),cols=Math.ceil(source.width/tile),rows=Math.ceil(source.height/tile);
   while(HEADER_BYTES+cols*rows*maxLeafBytes>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
@@ -280,10 +305,19 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
       directRelative=selected.error?directReduction/selected.error:0,
       directGain=directReduction/samples,
       directExtra=1+children.reduce((sum,node)=>sum+leafBytes(node.record),0)-leafBytes(selected.record),
-      directEff=directReduction/Math.max(1,directExtra);
+      parentPiPixels=isPiRecord(selected.record)?selected.w*selected.h:0,
+      directPiPixels=piPixelsOf(children),
+      directPiDelta=(directPiPixels-parentPiPixels)/(selected.w*selected.h),
+      directEff=directReduction/Math.max(1,directExtra),
+      directCoverageScore=directPiDelta*(240+1760*piPreference*piPreference),
+      directScore=directEff+directCoverageScore,
+      directLosesPi=directPiDelta<0&&piPreference>=.95,
+      directCoverageDriven=directPiDelta>0&&piPreference>=.8;
     let bestPlan:{children:Region[];leaves:Region[];extraBytes:number;reduction:number;efficiency:number;splitChild?:Region;grandchildren?:Region[]}|undefined;
-    if(directExtra>0&&size+directExtra<=budget&&directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample&&directEff>=minEfficiency){
-      bestPlan={children,leaves:children,extraBytes:directExtra,reduction:directReduction,efficiency:directEff};
+    const directQualityOk=directReduction>0&&directRelative>=minRelativeGain&&directGain>=minGainPerSample&&directScore>=minEfficiency,
+      directPiOk=directCoverageDriven&&(piPreference>=.999||directScore>=minEfficiency*.35);
+    if(directExtra>0&&size+directExtra<=budget&&!directLosesPi&&(directQualityOk||directPiOk)){
+      bestPlan={children,leaves:children,extraBytes:directExtra,reduction:directReduction,efficiency:directScore};
     }
 
     if(lookaheadChildren){
@@ -297,8 +331,16 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
           gain=reduction/samples,
           planTreeBytes=1+children.reduce((sum,node)=>sum+(node===child?1+grandchildren.reduce((inner,g)=>inner+leafBytes(g.record),0):leafBytes(node.record)),0),
           extraBytes=planTreeBytes-leafBytes(selected.record),
-          efficiency=reduction/Math.max(1,extraBytes);
-        if(extraBytes>0&&size+extraBytes<=budget&&reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&efficiency>=minEfficiency*.85&&(!bestPlan||efficiency>bestPlan.efficiency)){
+          rawEfficiency=reduction/Math.max(1,extraBytes),
+          planPiPixels=piPixelsOf(planLeaves),
+          piDelta=(planPiPixels-parentPiPixels)/(selected.w*selected.h),
+          coverageScore=piDelta*(240+1760*piPreference*piPreference),
+          efficiency=rawEfficiency+coverageScore,
+          losesPi=piDelta<0&&piPreference>=.95,
+          coverageDriven=piDelta>0&&piPreference>=.8,
+          qualityOk=reduction>0&&relative>=minRelativeGain&&gain>=minGainPerSample*.8&&efficiency>=minEfficiency*.85,
+          piOk=coverageDriven&&(piPreference>=.999||efficiency>=minEfficiency*.3);
+        if(extraBytes>0&&size+extraBytes<=budget&&!losesPi&&(qualityOk||piOk)&&(!bestPlan||efficiency>bestPlan.efficiency)){
           bestPlan={children,leaves:planLeaves,extraBytes,reduction,efficiency,splitChild:child,grandchildren};
         }
       }
