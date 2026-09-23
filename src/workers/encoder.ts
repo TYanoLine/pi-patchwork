@@ -2,7 +2,7 @@
 import { encode, parseDigits, type EncodeProgress } from '../core/codec';
 import { parsePiIndex } from '../core/piIndex';
 
-self.onmessage = (event: MessageEvent<{image: ImageData; digits: string; index: ArrayBuffer; savePercent: number; quality: number; splitPersistence: number}>) => {
+self.onmessage = (event: MessageEvent<{image: ImageData; digits: string; index: ArrayBuffer; savePercent: number; quality: number; splitPersistence: number; minPatchSize: number}>) => {
   try {
     const digits = parseDigits(event.data.digits);
     const index = parsePiIndex(event.data.index);
@@ -22,6 +22,7 @@ self.onmessage = (event: MessageEvent<{image: ImageData; digits: string; index: 
       event.data.savePercent,
       event.data.quality,
       event.data.splitPersistence,
+      event.data.minPatchSize,
       {
         onProgress,
         shouldPreview: () => performance.now() - lastPreviewAt >= 140,
