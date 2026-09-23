@@ -7,6 +7,23 @@ const FORMAT_VERSION = 4;
 const DICTIONARY_ID = 1;
 export type EncodedStats = { budgetBytes:number; actualBytes:number; ratio:number; tileSize:number; patches:number; piPatches:number; mse:number; psnr:number };
 export type EncodeResult = { bytes:Uint8Array; image:ImageData; stats:EncodedStats };
+export type EncodePreviewPatch = { x:number; y:number; width:number; height:number; pixels:Uint8ClampedArray };
+export type EncodeProgress = {
+  phase:'roots'|'refine'|'final';
+  overall:number;
+  done:number;
+  total:number;
+  attempts:number;
+  patches:number;
+  bytes:number;
+  budget:number;
+  elapsedMs:number;
+  preview?:EncodePreviewPatch[];
+};
+export type EncodeHooks = {
+  onProgress?:(event:EncodeProgress)=>void;
+  shouldPreview?:()=>boolean;
+};
 type Record = { offset:number; bias:[number,number,number]; gain:[number,number,number]; transform:number; repeat:number; phase:number; sourceSize:number; solid:boolean; gradient?:boolean };
 type Candidate = { offset:number; transform:number; repeat:number; phase:number; sourceSize:number; score:number };
 
@@ -54,6 +71,15 @@ function pixel(r:Record,d:Uint8Array,x:number,y:number,tw:number,th:number,ch:nu
   return clamp(r.bias[ch]+r.gain[ch]*(r.solid?0:qAt(d,r.offset,x,y,r.transform,r.repeat,r.phase,r.sourceSize,tw,th)));
 }
 function rSlopeY(r:Record,ch:number){return ((r.offset>>(ch*8))&255)<<24>>24;}
+function renderRegion(region:Region,digits:Uint8Array):EncodePreviewPatch {
+  const pixels=new Uint8ClampedArray(region.w*region.h*4);
+  for(let y=0;y<region.h;y++)for(let x=0;x<region.w;x++){
+    const p=(y*region.w+x)*4;
+    for(let ch=0;ch<3;ch++)pixels[p+ch]=pixel(region.record,digits,x,y,region.w,region.h,ch);
+    pixels[p+3]=255;
+  }
+  return{x:region.x,y:region.y,width:region.w,height:region.h,pixels};
+}
 function fit(data:Uint8ClampedArray,width:number,x0:number,y0:number,tw:number,th:number,d:Uint8Array,c:Candidate):Record {
   let sw=0,sq=0,sq2=0;const sy=[0,0,0],sqy=[0,0,0];
   for(let y=0;y<th;y++)for(let x=0;x<tw;x++){
@@ -149,21 +175,26 @@ function pairSeamMismatch(a:Region,b:Region,data:Uint8ClampedArray,width:number,
 function seamPenalty(leaves:Region[],data:Uint8ClampedArray,width:number,digits:Uint8Array){
   let total=0;for(let i=0;i<leaves.length;i++)for(let j=i+1;j<leaves.length;j++)total+=pairSeamMismatch(leaves[i],leaves[j],data,width,digits);return total;
 }
-export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50):EncodeResult {
+export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePercent:number,quality=1,splitPersistence=50,hooks?:EncodeHooks):EncodeResult {
   if(!digits.length||digits.length>0xffffffff||index.digitCount!==digits.length||source.width>65535||source.height>65535)throw new Error('画像・円周率辞書・特徴インデックスが一致しません');
   const raw=source.width*source.height*3,budget=Math.max(HEADER_BYTES+13,Math.floor(raw*savePercent/100));
   const persistence=Math.max(0,Math.min(100,splitPersistence))/100,
     lookaheadChildren=splitPersistence<=0?0:Math.max(1,Math.min(4,Math.ceil(persistence*4))),
     minRelativeGain=.045,
     minGainPerSample=.75;
+  const started=performance.now();
   let tile=Math.max(16,Math.min(64,Math.ceil(Math.max(source.width,source.height)/8))),cols=Math.ceil(source.width/tile),rows=Math.ceil(source.height/tile);
   while(HEADER_BYTES+cols*rows*13>budget){tile++;cols=Math.ceil(source.width/tile);rows=Math.ceil(source.height/tile);}
+  const rootTotal=cols*rows,initialSize=HEADER_BYTES+rootTotal*13;
+  const emit=(event:Omit<EncodeProgress,'elapsedMs'>)=>hooks?.onProgress?.({...event,elapsedMs:performance.now()-started});
+  const previewFor=(regions:Region[])=>hooks?.shouldPreview?.()?regions.map(region=>renderRegion(region,digits)):undefined;
   const make=(x:number,y:number,w:number,h:number):Region=>{const record=best(source.data,source.width,x,y,w,h,digits,index,quality);return{x,y,w,h,record,error:reconstructionError(record,source.data,source.width,x,y,w,h,digits)};};
-  const roots:Region[]=[],leaves:Region[]=[];
+  const roots:Region[]=[],leaves:Region[]=[];let rootDone=0;
   for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){
-    const x=gx*tile,y=gy*tile,node=make(x,y,Math.min(tile,source.width-x),Math.min(tile,source.height-y));roots.push(node);leaves.push(node);
+    const x=gx*tile,y=gy*tile,node=make(x,y,Math.min(tile,source.width-x),Math.min(tile,source.height-y));roots.push(node);leaves.push(node);rootDone++;
+    emit({phase:'roots',overall:.28*rootDone/rootTotal,done:rootDone,total:rootTotal,attempts:0,patches:leaves.length,bytes:HEADER_BYTES+leaves.length*13,budget,preview:previewFor([node])});
   }
-  let size=HEADER_BYTES+leaves.length*13;
+  let size=initialSize,attempts=0;
   while(size+40<=budget){
     let selected:Region|undefined,priority=0;
     for(const node of leaves)if(!node.tried&&node.w>=8&&node.h>=8){
@@ -171,7 +202,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
       if(score>priority){selected=node;priority=score;}
     }
     if(!selected)break;
-    selected.tried=true;
+    selected.tried=true;attempts++;
     const children=partition(selected.x,selected.y,selected.w,selected.h).map(([x,y,w,h])=>make(x,y,w,h)),
       directCost=children.reduce((sum,node)=>sum+node.error,0)+seamPenalty(children,source.data,source.width,digits),
       directReduction=selected.error-directCost,
@@ -199,12 +230,19 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
         }
       }
     }
-    if(!bestPlan)continue;
+    if(!bestPlan){
+      const refineTotal=Math.max(1,budget-initialSize),used=Math.max(0,size-initialSize);
+      emit({phase:'refine',overall:.28+.67*Math.min(1,used/refineTotal),done:used,total:refineTotal,attempts,patches:leaves.length,bytes:size,budget});
+      continue;
+    }
     selected.children=bestPlan.children;
     if(bestPlan.splitChild&&bestPlan.grandchildren)bestPlan.splitChild.children=bestPlan.grandchildren;
     leaves.splice(leaves.indexOf(selected),1,...bestPlan.leaves);
     size+=bestPlan.extraBytes;
+    const refineTotal=Math.max(1,budget-initialSize),used=Math.max(0,size-initialSize);
+    emit({phase:'refine',overall:.28+.67*Math.min(1,used/refineTotal),done:used,total:refineTotal,attempts,patches:leaves.length,bytes:size,budget,preview:previewFor(bestPlan.leaves)});
   }
+  emit({phase:'final',overall:.97,done:size,total:budget,attempts,patches:leaves.length,bytes:size,budget});
   const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);MAGIC.forEach((m,i)=>view.setUint8(i,m));view.setUint8(4,FORMAT_VERSION);view.setUint16(5,source.width,true);view.setUint16(7,source.height,true);view.setUint16(9,tile,true);view.setUint16(11,cols,true);view.setUint16(13,rows,true);view.setUint32(15,digits.length,true);view.setUint32(19,leaves.length,true);view.setUint8(23,DICTIONARY_ID);
   let cursor=HEADER_BYTES;
   const write=(node:Region)=>{
@@ -215,6 +253,7 @@ export function encode(source:ImageData,digits:Uint8Array,index:PiIndex,savePerc
   roots.forEach(write);
   if(cursor!==bytes.length)throw new Error('サイズ計算が一致しません');
   const image=decode(bytes,digits),mse=mseOf(source,image),psnr=mse?10*Math.log10(255*255/mse):Infinity;
+  emit({phase:'final',overall:1,done:bytes.length,total:budget,attempts,patches:leaves.length,bytes:bytes.length,budget});
   return{bytes,image,stats:{budgetBytes:budget,actualBytes:bytes.length,ratio:bytes.length/raw*100,tileSize:tile,patches:leaves.length,piPatches:leaves.filter(r=>!r.record.solid&&!r.record.gradient).length,mse,psnr}};
 }
 export function decode(bytes:Uint8Array,digits:Uint8Array):ImageData {
