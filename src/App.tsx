@@ -221,6 +221,7 @@ export default function App() {
     [quality, setQuality] = useState<Quality>(1),
     [objective, setObjective] = useState<EncodeObjective>("dictionary"),
     [compressionPriority, setCompressionPriority] = useState(70),
+    [piComposition, setPiComposition] = useState(90),
     [splitPersistence, setSplitPersistence] = useState(55),
     [minPatchSize, setMinPatchSize] = useState<MinPatchSize>(16),
     [encodeProgress, setEncodeProgress] = useState<EncodeProgress>(),
@@ -376,7 +377,7 @@ export default function App() {
       setError("処理中にエラーが発生しました");
     };
     const featureIndex = index.slice(0);
-    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence, minPatchSize, objective, compressionPriority }, [
+    w.postMessage({ image, digits, index: featureIndex, savePercent: saving, quality, splitPersistence, minPatchSize, objective, compressionPriority, piComposition }, [
       image.data.buffer,
       featureIndex,
     ]);
@@ -497,23 +498,42 @@ export default function App() {
             <small>非圧縮RGBに対する最大サイズ。辞書優先では効率が悪ければこの上限より手前で停止します。</small>
           </div>
           {objective === "dictionary" && (
-            <div className="control">
-              <div>
-                <span>辞書圧縮優先度</span>
-                <b>{compressionPriority}</b>
+            <>
+              <div className="control">
+                <div>
+                  <span>辞書圧縮優先度</span>
+                  <b>{compressionPriority}</b>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="5"
+                  value={compressionPriority}
+                  onChange={(e) => setCompressionPriority(+e.target.value)}
+                />
+                <small>
+                  高いほど大きなパッチを保ち、1 byteあたりの改善が小さい分割を強く捨てます。
+                </small>
               </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="5"
-                value={compressionPriority}
-                onChange={(e) => setCompressionPriority(+e.target.value)}
-              />
-              <small>
-                高いほど大きなパッチと辞書参照を優先し、1 byteあたりの改善が小さい分割を強く捨てます。
-              </small>
-            </div>
+              <div className="control">
+                <div>
+                  <span>π構成率</span>
+                  <b>{piComposition}</b>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="5"
+                  value={piComposition}
+                  onChange={(e) => setPiComposition(+e.target.value)}
+                />
+                <small>
+                  π採用の強さです。高いほどsolid / gradientよりπパッチを優先します。実際の面積比は結果の「π辞書カバー率」で確認できます。
+                </small>
+              </div>
+            </>
           )}
           <div className="control">
             <span>探索モード</span>
