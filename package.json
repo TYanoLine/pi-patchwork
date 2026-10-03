@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test": "vitest run",
-    "check": "npm run test && npm run build"
+    "check": "npm run test && npm run build",
+    "prepare:pi": "node scripts/generate-pi-assets.mjs",
+    "predev": "npm run prepare:pi",
+    "prebuild": "npm run prepare:pi"
   },
   "dependencies": {
     "@jsquash/webp": "^1.5.0",
